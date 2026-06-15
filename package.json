@@ -1,0 +1,29 @@
+{
+  "name": "prilinesha_backend_anpr",
+  "version": "1.0.0",
+  "description": "License Plate Recognition (LPR) parking/gate management backend",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "lpr",
+    "anpr",
+    "intozi",
+    "parking",
+    "gate"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "cors": "^2.8.6",
+    "dotenv": "^16.6.1",
+    "express": "^4.22.2",
+    "mongoose": "^8.24.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14"
+  }
+}
