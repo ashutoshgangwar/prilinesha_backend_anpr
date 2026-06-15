@@ -52,7 +52,7 @@ router.post("/event", apiKey, async (req, res) => {
     // --- Persist the full payload ---
     const log = await VehicleLog.create({
       application_name: payload.application_name,
-      application_id: payload.application_id,
+      application_id: payload.application_id, 
       device_name: payload.device_name,
       device_unique_key: payload.device_unique_key,
       group_id: payload.group_id,
