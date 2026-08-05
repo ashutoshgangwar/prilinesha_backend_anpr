@@ -1,6 +1,11 @@
 const mongoose = require('mongoose');
 
-const { VEHICLE_CLASSES, VEHICLE_COLORS } = require('../utils/constants');
+const {
+  VEHICLE_CLASSES,
+  VEHICLE_COLORS,
+  VEHICLE_TYPES,
+  DEFAULT_VEHICLE_TYPE,
+} = require('../utils/constants');
 
 /**
  * One ANPR detection event delivered by a camera.
@@ -29,6 +34,19 @@ const vehicleLogSchema = new mongoose.Schema(
     vehicle_number: { type: String, trim: true, uppercase: true, default: null },
     vehicle_class: { type: String, enum: [...VEHICLE_CLASSES, null], default: null },
     color: { type: String, enum: [...VEHICLE_COLORS, null], default: null },
+
+    // Registration status. Defaults to "unregistered": a vehicle counts as
+    // registered only when the camera positively says so.
+    vehicle_type: { type: String, enum: VEHICLE_TYPES, default: DEFAULT_VEHICLE_TYPE, index: true },
+    vehicle_model: { type: String, trim: true, default: null },
+
+    // ---- Owner / driver details ----
+    // Stored when supplied, but never exposed on the Intozi feed (see
+    // FEED_MASKED_FIELDS in utils/constants.js).
+    owner_name: { type: String, trim: true, default: null },
+    contact_no: { type: String, trim: true, default: null },
+    email: { type: String, trim: true, lowercase: true, default: null },
+    driver_name: { type: String, trim: true, default: null },
 
     // ---- Violations ----
     triple_riding: { type: Boolean, default: false },
@@ -66,5 +84,10 @@ vehicleLogSchema.index({ vehicle_number: 1, created_datetime: -1 }, { name: 'idx
 
 // Time-range reports.
 vehicleLogSchema.index({ created_datetime: -1 }, { name: 'idx_created_datetime' });
+
+// Intozi polling feed: keyset pagination over (received_at, _id) ascending.
+// The _id tiebreaker makes the cursor exact when several events land in the
+// same millisecond, so a poll can neither skip nor repeat a record.
+vehicleLogSchema.index({ received_at: 1, _id: 1 }, { name: 'idx_feed_cursor' });
 
 module.exports = mongoose.model('VehicleLog', vehicleLogSchema);

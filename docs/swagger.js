@@ -1,4 +1,10 @@
-const { VEHICLE_CLASSES, VEHICLE_COLORS } = require('../utils/constants');
+const {
+  VEHICLE_CLASSES,
+  VEHICLE_COLORS,
+  VEHICLE_TYPES,
+  FEED_DEFAULT_LIMIT,
+  FEED_MAX_LIMIT,
+} = require('../utils/constants');
 
 /** OpenAPI 3.0 description of the public surface, served at /api-docs. */
 const swaggerSpec = {
@@ -63,6 +69,19 @@ const swaggerSpec = {
             example: '/9j/4AAQSkZJRgABAQAAAQABAAD...',
           },
           vehicle_number: { type: 'string', nullable: true, example: 'UP32AB1234' },
+          vehicle_type: {
+            type: 'string',
+            nullable: true,
+            enum: VEHICLE_TYPES,
+            default: 'unregistered',
+            description: 'Registration status. Omitted means "unregistered".',
+            example: 'registered',
+          },
+          vehicle_model: { type: 'string', nullable: true, maxLength: 100, example: 'Swift VXI' },
+          owner_name: { type: 'string', nullable: true, maxLength: 150, example: 'Ramesh Kumar' },
+          contact_no: { type: 'string', nullable: true, example: '+91 9876543210' },
+          email: { type: 'string', format: 'email', nullable: true, example: 'owner@example.com' },
+          driver_name: { type: 'string', nullable: true, maxLength: 150, example: 'Suresh Yadav' },
           triple_riding: { type: 'boolean', default: false },
           vehicle_class: { type: 'string', nullable: true, enum: VEHICLE_CLASSES, example: 'car' },
           no_helmet: { type: 'boolean', default: false },
@@ -96,6 +115,43 @@ const swaggerSpec = {
               plate_image_path: { type: 'string', example: 'uploads/plate-images/plate_108_20251222T123301851Z_1b7de904.jpg' },
             },
           },
+          requestId: { type: 'string', format: 'uuid' },
+        },
+      },
+      VehicleFeedRecord: {
+        type: 'object',
+        description:
+          'One event on the Intozi feed. Only vehicle_number and vehicle_type carry data — ' +
+          'every other field is returned as null by contract, even when the database holds a value.',
+        properties: {
+          owner_name: { type: 'string', nullable: true, example: null },
+          created_datetime: { type: 'string', nullable: true, example: null },
+          contact_no: { type: 'string', nullable: true, example: null },
+          email: { type: 'string', nullable: true, example: null },
+          driver_name: { type: 'string', nullable: true, example: null },
+          vehicle_model: { type: 'string', nullable: true, example: null },
+          vehicle_type: { type: 'string', enum: VEHICLE_TYPES, example: 'registered' },
+          vehicle_number: { type: 'string', nullable: true, example: 'UP32AB1234' },
+        },
+      },
+      VehicleFeedResponse: {
+        type: 'object',
+        properties: {
+          success: { type: 'boolean', example: true },
+          message: { type: 'string', example: 'Vehicle feed fetched successfully.' },
+          count: { type: 'integer', example: 2 },
+          next_cursor: {
+            type: 'string',
+            nullable: true,
+            description: 'Send this back as `cursor` on the next poll to receive only newer events.',
+            example: 'MjAyNS0xMi0yMlQxMjozMzowMS44NDRafDY3ODlhYjAxYzJkM2U0ZjU2Nzg5MDEyMw',
+          },
+          has_more: {
+            type: 'boolean',
+            description: 'true when more events are already waiting — poll again immediately instead of sleeping.',
+            example: false,
+          },
+          data: { type: 'array', items: { $ref: '#/components/schemas/VehicleFeedRecord' } },
           requestId: { type: 'string', format: 'uuid' },
         },
       },
@@ -160,6 +216,68 @@ const swaggerSpec = {
           400: { $ref: '#/components/responses/BadRequest' },
           401: { $ref: '#/components/responses/Unauthorized' },
           409: { $ref: '#/components/responses/Conflict' },
+          429: { $ref: '#/components/responses/TooManyRequests' },
+          500: { $ref: '#/components/responses/ServerError' },
+        },
+      },
+    },
+    '/api/anpr/feed': {
+      get: {
+        tags: ['ANPR'],
+        summary: 'Vehicle feed polled by the Intozi server',
+        description:
+          'Designed to be polled every 5-10 seconds. Returns the vehicle number and its ' +
+          'registered/unregistered status; all other fields are null by contract.\n\n' +
+          '**Polling loop:** call once without parameters (returns the newest page), then send the ' +
+          '`next_cursor` from every response back as `cursor`. Each event is delivered exactly once. ' +
+          'While `has_more` is true, poll again immediately rather than waiting for the next interval.',
+        security: [{ ApiKeyAuth: [] }],
+        parameters: [
+          {
+            name: 'cursor',
+            in: 'query',
+            required: false,
+            schema: { type: 'string' },
+            description: 'The `next_cursor` from the previous response. Omit on the very first call.',
+          },
+          {
+            name: 'since',
+            in: 'query',
+            required: false,
+            schema: { type: 'string', format: 'date-time' },
+            description:
+              'Alternative cold start: return events received after this instant. Ignored when `cursor` is sent.',
+            example: '2025-12-22T12:33:01.744Z',
+          },
+          {
+            name: 'limit',
+            in: 'query',
+            required: false,
+            schema: {
+              type: 'integer',
+              minimum: 1,
+              maximum: FEED_MAX_LIMIT,
+              default: FEED_DEFAULT_LIMIT,
+            },
+            description: 'Page size.',
+          },
+          {
+            name: 'vehicle_type',
+            in: 'query',
+            required: false,
+            schema: { type: 'string', enum: VEHICLE_TYPES },
+            description: 'Return only registered or only unregistered vehicles.',
+          },
+        ],
+        responses: {
+          200: {
+            description: 'Feed page (an empty `data` array simply means nothing new since the cursor)',
+            content: {
+              'application/json': { schema: { $ref: '#/components/schemas/VehicleFeedResponse' } },
+            },
+          },
+          400: { $ref: '#/components/responses/BadRequest' },
+          401: { $ref: '#/components/responses/Unauthorized' },
           429: { $ref: '#/components/responses/TooManyRequests' },
           500: { $ref: '#/components/responses/ServerError' },
         },

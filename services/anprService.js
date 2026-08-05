@@ -2,6 +2,13 @@ const VehicleLog = require('../models/VehicleLog');
 const AppError = require('../utils/AppError');
 const logger = require('../utils/logger');
 const { saveEventImages, removeFiles } = require('../utils/imageStorage');
+const { encodeCursor, decodeCursor } = require('../utils/feedCursor');
+const {
+  DEFAULT_VEHICLE_TYPE,
+  FEED_MASKED_FIELDS,
+  FEED_DEFAULT_LIMIT,
+  FEED_MAX_LIMIT,
+} = require('../utils/constants');
 
 /**
  * ANPR business logic.
@@ -70,6 +77,12 @@ const createAnprEvent = async (payload, { requestId } = {}) => {
       vehicle_number: payload.vehicle_number ?? null,
       vehicle_class: payload.vehicle_class ?? null,
       color: payload.color ?? null,
+      vehicle_type: payload.vehicle_type ?? DEFAULT_VEHICLE_TYPE,
+      vehicle_model: payload.vehicle_model ?? null,
+      owner_name: payload.owner_name ?? null,
+      contact_no: payload.contact_no ?? null,
+      email: payload.email ?? null,
+      driver_name: payload.driver_name ?? null,
       triple_riding: payload.triple_riding ?? false,
       no_helmet: payload.no_helmet ?? false,
       no_seatbelt: payload.no_seatbelt ?? false,
@@ -103,4 +116,120 @@ const createAnprEvent = async (payload, { requestId } = {}) => {
   }
 };
 
-module.exports = { createAnprEvent };
+/**
+ * Shapes one stored event into the record Intozi expects.
+ *
+ * Only the vehicle number and the registered/unregistered status are disclosed;
+ * every field in FEED_MASKED_FIELDS is reported as null even when the database
+ * holds a value for it. The key order matches the agreed contract.
+ *
+ * @param {object} record Lean VehicleLog document.
+ */
+const toFeedRecord = (record) => {
+  const feedRecord = {
+    owner_name: null,
+    created_datetime: null,
+    contact_no: null,
+    email: null,
+    driver_name: null,
+    vehicle_model: null,
+    vehicle_type: record.vehicle_type ?? DEFAULT_VEHICLE_TYPE,
+    vehicle_number: record.vehicle_number ?? null,
+  };
+
+  // Guard against a future contributor "helpfully" un-masking a field: anything
+  // listed as masked is forced back to null on the way out.
+  FEED_MASKED_FIELDS.forEach((field) => {
+    feedRecord[field] = null;
+  });
+
+  return feedRecord;
+};
+
+/**
+ * Reads the polling feed consumed by the Intozi server every 5-10 seconds.
+ *
+ * Paging is keyset-based over (received_at, _id) ascending: hand the returned
+ * `next_cursor` back on the following poll and you get every event ingested
+ * since — exactly once, with no gaps or repeats, however many rows were written
+ * in between. An offset would drift under concurrent inserts.
+ *
+ * A first call with no cursor and no `since` returns the newest `limit` events,
+ * so a cold start does not replay the entire history.
+ *
+ * @param {object} [params]
+ * @param {string} [params.cursor]       Opaque cursor from a previous response.
+ * @param {Date}   [params.since]        Return events received strictly after this instant.
+ * @param {number} [params.limit]        Page size (default 100, max 1000).
+ * @param {string} [params.vehicleType]  Restrict to 'registered' or 'unregistered'.
+ * @param {object} [context]
+ * @param {string} [context.requestId]   Correlation id for logging.
+ * @returns {Promise<{ records: object[], count: number, next_cursor: string|null, has_more: boolean }>}
+ * @throws {AppError} 400 when the cursor is malformed.
+ */
+const getVehicleFeed = async (
+  { cursor, since, limit, vehicleType } = {},
+  { requestId } = {}
+) => {
+  const log = logger.child({ requestId });
+  const pageSize = Math.min(Number(limit) || FEED_DEFAULT_LIMIT, FEED_MAX_LIMIT);
+
+  const filter = {};
+  if (vehicleType) filter.vehicle_type = vehicleType;
+
+  let position = null;
+
+  if (cursor) {
+    position = decodeCursor(cursor);
+    if (!position) {
+      throw AppError.badRequest('cursor is not a valid feed cursor.', [
+        { field: 'cursor', message: 'Send the next_cursor value returned by a previous response.' },
+      ]);
+    }
+
+    // Strictly after the cursor: same millisecond is disambiguated by _id.
+    filter.$or = [
+      { received_at: { $gt: position.receivedAt } },
+      { received_at: position.receivedAt, _id: { $gt: position.id } },
+    ];
+  } else if (since) {
+    filter.received_at = { $gt: since };
+  }
+
+  const projection = 'vehicle_number vehicle_type received_at';
+
+  // No cursor and no `since` means a cold start: take the newest page from the
+  // tail and flip it, so the caller still receives it oldest-first.
+  const coldStart = !position && !since;
+
+  const documents = await VehicleLog.find(filter)
+    .select(projection)
+    .sort(coldStart ? { received_at: -1, _id: -1 } : { received_at: 1, _id: 1 })
+    .limit(pageSize + 1) // one extra row answers has_more without a second query
+    .lean();
+
+  const hasMore = documents.length > pageSize;
+  const page = hasMore ? documents.slice(0, pageSize) : documents;
+
+  if (coldStart) page.reverse();
+
+  const last = page[page.length - 1];
+
+  log.info('Intozi feed served', {
+    count: page.length,
+    has_more: coldStart ? false : hasMore,
+    cursor: cursor || null,
+  });
+
+  return {
+    records: page.map(toFeedRecord),
+    count: page.length,
+    // Keep the previous cursor alive on an empty poll so the caller never has
+    // to remember it themselves.
+    next_cursor: last ? encodeCursor(last) : cursor || null,
+    // On a cold start the extra row is older than the page, not newer.
+    has_more: coldStart ? false : hasMore,
+  };
+};
+
+module.exports = { createAnprEvent, getVehicleFeed };

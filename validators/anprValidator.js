@@ -1,6 +1,6 @@
-const { body } = require('express-validator');
+const { body, query } = require('express-validator');
 
-const { VEHICLE_CLASSES, VEHICLE_COLORS } = require('../utils/constants');
+const { VEHICLE_CLASSES, VEHICLE_COLORS, VEHICLE_TYPES, FEED_MAX_LIMIT } = require('../utils/constants');
 
 /**
  * Validation rules for POST /api/anpr.
@@ -16,6 +16,17 @@ const optionalBoolean = (field) =>
     .isBoolean({ strict: false })
     .withMessage(`${field} must be a boolean.`)
     .toBoolean();
+
+/** Free-text detail that a camera may omit, send as null or send as "". */
+const optionalText = (field, maxLength) =>
+  body(field)
+    .optional({ nullable: true, checkFalsy: true })
+    .isString()
+    .withMessage(`${field} must be a string.`)
+    .bail()
+    .trim()
+    .isLength({ max: maxLength })
+    .withMessage(`${field} must be at most ${maxLength} characters.`);
 
 /** Latitude/longitude are transmitted as strings; validate the numeric range. */
 const optionalCoordinate = (field, limit) =>
@@ -140,6 +151,46 @@ const anprEventRules = [
     .isIn(VEHICLE_COLORS)
     .withMessage(`color must be one of: ${VEHICLE_COLORS.join(', ')}.`),
 
+  body('vehicle_type')
+    .optional({ nullable: true, checkFalsy: true })
+    .isString()
+    .withMessage('vehicle_type must be a string.')
+    .bail()
+    .trim()
+    .toLowerCase()
+    .isIn(VEHICLE_TYPES)
+    .withMessage(`vehicle_type must be one of: ${VEHICLE_TYPES.join(', ')}.`),
+
+  optionalText('vehicle_model', 100),
+
+  // ---- Owner / driver details (stored, never returned on the Intozi feed) ----
+  optionalText('owner_name', 150),
+  optionalText('driver_name', 150),
+
+  body('contact_no')
+    .optional({ nullable: true, checkFalsy: true })
+    .isString()
+    .withMessage('contact_no must be a string.')
+    .bail()
+    .trim()
+    .matches(/^\+?[0-9][0-9\s-]{5,19}$/)
+    .withMessage(
+      'contact_no must be 6-20 characters of digits, optionally prefixed with + and separated by spaces or hyphens.'
+    ),
+
+  body('email')
+    .optional({ nullable: true, checkFalsy: true })
+    .isString()
+    .withMessage('email must be a string.')
+    .bail()
+    .trim()
+    .isEmail()
+    .withMessage('email must be a valid email address.')
+    .bail()
+    .isLength({ max: 254 })
+    .withMessage('email must be at most 254 characters.')
+    .normalizeEmail({ gmail_remove_dots: false }),
+
   // ---- Violation flags ----
   optionalBoolean('triple_riding'),
   optionalBoolean('no_helmet'),
@@ -182,4 +233,51 @@ const anprEventRules = [
     }),
 ];
 
-module.exports = { anprEventRules };
+/**
+ * Validation rules for GET /api/anpr/feed — the endpoint Intozi polls every
+ * 5-10 seconds.
+ */
+const anprFeedQueryRules = [
+  query('cursor')
+    .optional({ nullable: true, checkFalsy: true })
+    .isString()
+    .withMessage('cursor must be a string.')
+    .bail()
+    .trim()
+    .isLength({ max: 200 })
+    .withMessage('cursor is not a valid feed cursor.'),
+
+  query('since')
+    .optional({ nullable: true, checkFalsy: true })
+    .isString()
+    .withMessage('since must be an ISO 8601 datetime string.')
+    .bail()
+    .trim()
+    .isISO8601()
+    .withMessage('since must be a valid ISO 8601 datetime (e.g. 2025-12-22T12:33:01.744Z).')
+    .bail()
+    .customSanitizer((value) => {
+      // Same rule as created_datetime: a naive timestamp means UTC.
+      const hasTimezone = /(Z|[+-]\d{2}:?\d{2})$/i.test(value);
+      return new Date(hasTimezone ? value : `${value}Z`);
+    }),
+
+  // Omitted → the service falls back to FEED_DEFAULT_LIMIT.
+  query('limit')
+    .optional({ nullable: true, checkFalsy: true })
+    .isInt({ min: 1, max: FEED_MAX_LIMIT })
+    .withMessage(`limit must be an integer between 1 and ${FEED_MAX_LIMIT}.`)
+    .toInt(),
+
+  query('vehicle_type')
+    .optional({ nullable: true, checkFalsy: true })
+    .isString()
+    .withMessage('vehicle_type must be a string.')
+    .bail()
+    .trim()
+    .toLowerCase()
+    .isIn(VEHICLE_TYPES)
+    .withMessage(`vehicle_type must be one of: ${VEHICLE_TYPES.join(', ')}.`),
+];
+
+module.exports = { anprEventRules, anprFeedQueryRules };

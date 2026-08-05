@@ -7,7 +7,8 @@
   "variable": [
     { "key": "base_url", "value": "http://localhost:5050" },
     { "key": "api_key", "value": "replace-with-your-api-key" },
-    { "key": "transaction_id", "value": "108" }
+    { "key": "transaction_id", "value": "108" },
+    { "key": "feed_cursor", "value": "" }
   ],
   "item": [
     {
@@ -48,7 +49,7 @@
         ],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"application_name\": \"ANPR\",\n  \"application_id\": 1,\n  \"device_name\": \"Intozi Camera 1\",\n  \"device_unique_key\": \"de21ba00-c4e2-474c-9106-b3bcc50e735f\",\n  \"group_id\": \"Gate-A\",\n  \"latitude\": \"12\",\n  \"longitude\": \"14\",\n  \"cam_id\": 3,\n  \"transaction_id\": {{transaction_id}},\n  \"color\": \"White\",\n  \"event_image\": \"/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==\",\n  \"vehicle_number\": \"UP32AB1234\",\n  \"triple_riding\": false,\n  \"vehicle_class\": \"car\",\n  \"no_helmet\": false,\n  \"plate_image\": \"/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==\",\n  \"no_seatbelt\": false,\n  \"driver_on_call_status\": false,\n  \"created_datetime\": \"2025-12-22T12:33:01.744613\"\n}"
+          "raw": "{\n  \"application_name\": \"ANPR\",\n  \"application_id\": 1,\n  \"device_name\": \"Intozi Camera 1\",\n  \"device_unique_key\": \"de21ba00-c4e2-474c-9106-b3bcc50e735f\",\n  \"group_id\": \"Gate-A\",\n  \"latitude\": \"12\",\n  \"longitude\": \"14\",\n  \"cam_id\": 3,\n  \"transaction_id\": {{transaction_id}},\n  \"color\": \"White\",\n  \"event_image\": \"/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==\",\n  \"vehicle_number\": \"UP32AB1234\",\n  \"vehicle_type\": \"registered\",\n  \"vehicle_model\": \"Swift VXI\",\n  \"owner_name\": \"Ramesh Kumar\",\n  \"contact_no\": \"+91 9876543210\",\n  \"email\": \"owner@example.com\",\n  \"driver_name\": \"Suresh Yadav\",\n  \"triple_riding\": false,\n  \"vehicle_class\": \"car\",\n  \"no_helmet\": false,\n  \"plate_image\": \"/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==\",\n  \"no_seatbelt\": false,\n  \"driver_on_call_status\": false,\n  \"created_datetime\": \"2025-12-22T12:33:01.744613\"\n}"
         },
         "url": { "raw": "{{base_url}}/api/anpr", "host": ["{{base_url}}"], "path": ["api", "anpr"] }
       },
@@ -63,6 +64,72 @@
               "// Bump the transaction id so the next run is not a duplicate.",
               "pm.collectionVariables.set('transaction_id', Number(pm.collectionVariables.get('transaction_id')) + 1);"
             ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "ANPR - Intozi feed (200)",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "{{api_key}}" }],
+        "description": "Polling feed for the Intozi server. First call: no cursor (returns the newest page). Every later call sends back the stored feed_cursor, so only new events arrive.",
+        "url": {
+          "raw": "{{base_url}}/api/anpr/feed?cursor={{feed_cursor}}&limit=100",
+          "host": ["{{base_url}}"],
+          "path": ["api", "anpr", "feed"],
+          "query": [
+            { "key": "cursor", "value": "{{feed_cursor}}", "description": "next_cursor from the previous response; leave empty on the first call" },
+            { "key": "limit", "value": "100", "description": "1-1000, default 100" },
+            { "key": "vehicle_type", "value": "registered", "description": "optional filter", "disabled": true },
+            { "key": "since", "value": "2025-12-22T12:33:01.744Z", "description": "optional cold start instead of cursor", "disabled": true }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 200', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "pm.test('feed envelope', () => {",
+              "  pm.expect(body.success).to.be.true;",
+              "  pm.expect(body.data).to.be.an('array');",
+              "});",
+              "pm.test('only vehicle_number and vehicle_type carry data', () => {",
+              "  body.data.forEach((record) => {",
+              "    ['owner_name', 'created_datetime', 'contact_no', 'email', 'driver_name', 'vehicle_model']",
+              "      .forEach((field) => pm.expect(record[field], field).to.be.null);",
+              "    pm.expect(record.vehicle_type).to.be.oneOf(['registered', 'unregistered']);",
+              "  });",
+              "});",
+              "// Persist the cursor so the next run only fetches new events.",
+              "if (body.next_cursor) pm.collectionVariables.set('feed_cursor', body.next_cursor);"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "ANPR - Intozi feed, bad cursor (400)",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "{{api_key}}" }],
+        "url": {
+          "raw": "{{base_url}}/api/anpr/feed?cursor=not-a-real-cursor",
+          "host": ["{{base_url}}"],
+          "path": ["api", "anpr", "feed"],
+          "query": [{ "key": "cursor", "value": "not-a-real-cursor" }]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": ["pm.test('status is 400', () => pm.response.to.have.status(400));"]
           }
         }
       ]

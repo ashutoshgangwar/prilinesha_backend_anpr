@@ -15,6 +15,7 @@ metadata in MongoDB.
 | Validation | `express-validator` rules with typed coercion and per-field error messages |
 | Images | Optional base64 decode, magic-byte check, size cap, unique filenames, rollback on failure |
 | Idempotency | Unique index on `transaction_id`; replays return `409` |
+| Intozi feed | `GET /api/anpr/feed`, polled every 5–10 s; keyset cursor delivers each event exactly once |
 | Errors | Centralized handler with a single response envelope (`400/401/404/409/413/429/500`) |
 | Logging | Winston, daily-rotated files + console, request ids, base64 payloads redacted |
 | Security | Helmet, CORS, per-IP rate limiting, 15 MB body cap, NoSQL-operator sanitizing |
@@ -112,6 +113,12 @@ Authorization: <API_KEY>          # "Bearer <API_KEY>" and "x-api-key" also acce
   "color": "White",
   "event_image": "base64...",
   "vehicle_number": "UP32AB1234",
+  "vehicle_type": "registered",
+  "vehicle_model": "Swift VXI",
+  "owner_name": "Ramesh Kumar",
+  "contact_no": "+91 9876543210",
+  "email": "owner@example.com",
+  "driver_name": "Suresh Yadav",
   "triple_riding": false,
   "vehicle_class": "car",
   "no_helmet": false,
@@ -140,6 +147,12 @@ Authorization: <API_KEY>          # "Bearer <API_KEY>" and "x-api-key" also acce
 | `vehicle_number` | no | 3–20 chars, `A-Z 0-9 -`, stored uppercase |
 | `vehicle_class` | no | `bus` \| `car` \| `bike` \| `truck` \| `auto` |
 | `color` | no | `White` \| `Gray` \| `Yellow` \| `Red` \| `Green` \| `Blue` \| `Black` |
+| `vehicle_type` | no | `registered` \| `unregistered`; **omitted → `unregistered`** |
+| `vehicle_model` | no | string, ≤ 100 chars |
+| `owner_name` | no | string, ≤ 150 chars |
+| `driver_name` | no | string, ≤ 150 chars |
+| `contact_no` | no | 6–20 digits, optional `+` prefix, spaces/hyphens allowed |
+| `email` | no | valid email, ≤ 254 chars, stored lowercase |
 | `triple_riding`, `no_helmet`, `no_seatbelt`, `driver_on_call_status` | no | boolean, default `false` |
 
 **200 OK**
@@ -179,6 +192,76 @@ Authorization: <API_KEY>          # "Bearer <API_KEY>" and "x-api-key" also acce
 | `413` | Body exceeds `JSON_BODY_LIMIT` |
 | `429` | Rate limit exceeded |
 | `500` | Unexpected server error |
+
+### `GET /api/anpr/feed`
+
+The endpoint the **Intozi server polls every 5–10 seconds**. It reports the vehicle number and
+whether the vehicle is registered; every other field is returned as `null` **by contract** — the
+database may well hold owner name, contact number, email, driver name, model and creation time, but
+this feed never discloses them.
+
+**Headers**
+
+```
+Authorization: <API_KEY>
+```
+
+**Query parameters**
+
+| Param | Default | Rule |
+| --- | --- | --- |
+| `cursor` | – | The `next_cursor` from the previous response. Omit on the first call. |
+| `since` | – | ISO 8601; alternative cold start. Ignored when `cursor` is sent. |
+| `limit` | `100` | Integer 1–1000 |
+| `vehicle_type` | – | `registered` \| `unregistered` — optional filter |
+
+**200 OK**
+
+```json
+{
+  "success": true,
+  "message": "Vehicle feed fetched successfully.",
+  "count": 1,
+  "next_cursor": "MjAyNi0wOC0wNVQxNTo1MjozMi4yNDhafDZhNzM1YzQwYTczYjNhZTMzY2MwODI5ZA",
+  "has_more": false,
+  "data": [
+    {
+      "owner_name": null,
+      "created_datetime": null,
+      "contact_no": null,
+      "email": null,
+      "driver_name": null,
+      "vehicle_model": null,
+      "vehicle_type": "registered",
+      "vehicle_number": "HR26DK8337"
+    }
+  ],
+  "requestId": "1f5f6c11-d4f0-4a9f-aa80-a8e3dd5227bc"
+}
+```
+
+**How Intozi should poll it**
+
+1. First call with no parameters → the newest `limit` events, oldest-first, plus a `next_cursor`.
+2. Every later call sends that cursor back: `GET /api/anpr/feed?cursor=<next_cursor>`.
+   Only events ingested since are returned — **exactly once, never skipped, never repeated**, no
+   matter how many arrived between two polls.
+3. Store the `next_cursor` from every response, including empty ones (`count: 0` echoes the cursor
+   back, so nothing is lost if the poller restarts mid-loop).
+4. While `has_more` is `true` the client is behind — poll again immediately instead of sleeping
+   for the interval.
+
+Paging is keyset-based on `(received_at, _id)`, not an offset, which is what makes the guarantee in
+step 2 hold under concurrent ingestion.
+
+| Status | When |
+| --- | --- |
+| `200` | Page returned (an empty `data` array just means nothing new) |
+| `400` | Malformed `cursor`, `since`, `limit` or `vehicle_type` |
+| `401` | Missing or invalid API key |
+| `429` | Rate limit exceeded — see `RATE_LIMIT_MAX` |
+
+> A 5-second interval is 12 requests/minute per poller, well inside the default limit of 300/minute.
 
 ### `GET /health`
 
@@ -220,6 +303,28 @@ curl -X POST http://localhost:5050/api/anpr \
   }'
 ```
 
+Then read it back off the Intozi feed — first the newest page, then only what is new:
+
+```bash
+# 1. cold start
+curl -s -H "Authorization: $API_KEY" "http://localhost:5050/api/anpr/feed?limit=5"
+
+# 2. every later poll — reuse the next_cursor from the previous response
+curl -s -H "Authorization: $API_KEY" "http://localhost:5050/api/anpr/feed?cursor=<next_cursor>"
+```
+
+A minimal poller:
+
+```bash
+CURSOR=""
+while true; do
+  BODY=$(curl -s -H "Authorization: $API_KEY" "http://localhost:5050/api/anpr/feed?cursor=$CURSOR")
+  echo "$BODY" | jq -c '.data[]'
+  CURSOR=$(echo "$BODY" | jq -r '.next_cursor // empty')
+  sleep 5
+done
+```
+
 ---
 
 ## Project structure
@@ -232,12 +337,12 @@ curl -X POST http://localhost:5050/api/anpr \
 │   ├── env.js                  # Environment validation & coercion (fails fast)
 │   └── database.js             # Mongo connect/disconnect, retry, connection state
 ├── routes/
-│   ├── anpr.js                 # POST /api/anpr
+│   ├── anpr.js                 # POST /api/anpr, GET /api/anpr/feed
 │   └── health.js               # GET /health, /health/ready
 ├── controllers/
 │   └── anprController.js       # Thin HTTP adapter
 ├── services/
-│   └── anprService.js          # Duplicate check → store images → insert → rollback
+│   └── anprService.js          # Ingestion (dedupe → images → insert → rollback) + Intozi feed
 ├── validators/
 │   └── anprValidator.js        # express-validator rules
 ├── middleware/
@@ -252,7 +357,8 @@ curl -X POST http://localhost:5050/api/anpr \
 ├── utils/
 │   ├── AppError.js             # Operational error with status code
 │   ├── asyncHandler.js
-│   ├── constants.js            # Allowed vehicle classes / colors
+│   ├── constants.js            # Vehicle classes / colors / types, feed masking & paging
+│   ├── feedCursor.js           # Opaque keyset cursor for the Intozi feed
 │   ├── imageStorage.js         # Base64 decode, write, rollback
 │   └── logger.js               # Winston (rotating files + console, redaction)
 ├── docs/swagger.js             # OpenAPI 3.0 spec
@@ -274,8 +380,17 @@ curl -X POST http://localhost:5050/api/anpr \
 | `transaction_id` (unique) | Idempotency — a retried delivery cannot duplicate a record |
 | `vehicle_number + created_datetime` | Plate search, newest first |
 | `created_datetime` | Time-range reports |
+| `received_at + _id` | Intozi feed cursor paging |
 
 `created_datetime` is the camera's timestamp; `received_at` is when this API accepted it.
+
+Owner and driver details (`owner_name`, `contact_no`, `email`, `driver_name`, `vehicle_model`) are
+stored whenever a camera sends them, but `GET /api/anpr/feed` always reports them as `null`. The
+masking list lives in `FEED_MASKED_FIELDS` (`utils/constants.js`) and is enforced in
+`anprService.toFeedRecord` — widen the feed there if Intozi's contract ever changes.
+
+`vehicle_type` defaults to `unregistered`: a vehicle counts as registered only when a camera says so
+explicitly. Documents written before this field existed therefore read back as `unregistered`.
 
 ---
 
