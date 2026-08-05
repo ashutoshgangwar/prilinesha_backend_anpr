@@ -1,4 +1,11 @@
 node_modules/
 .env
+.env.local
+logs/*
+!logs/.gitkeep
 *.log
 .DS_Store
+uploads/event-images/*
+uploads/plate-images/*
+!uploads/**/.gitkeep
+coverage/

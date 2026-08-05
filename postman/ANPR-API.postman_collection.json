@@ -1,0 +1,157 @@
+{
+  "info": {
+    "name": "Prilinesha ANPR API",
+    "description": "ANPR event ingestion API. Set the `base_url` and `api_key` collection variables before running.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:5050" },
+    { "key": "api_key", "value": "replace-with-your-api-key" },
+    { "key": "transaction_id", "value": "108" }
+  ],
+  "item": [
+    {
+      "name": "Health - liveness",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": { "raw": "{{base_url}}/health", "host": ["{{base_url}}"], "path": ["health"] }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 200', () => pm.response.to.have.status(200));",
+              "pm.test('service is UP', () => pm.expect(pm.response.json().status).to.eql('UP'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Health - readiness",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": { "raw": "{{base_url}}/health/ready", "host": ["{{base_url}}"], "path": ["health", "ready"] }
+      }
+    },
+    {
+      "name": "ANPR - create event (200)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Authorization", "value": "{{api_key}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"application_name\": \"ANPR\",\n  \"application_id\": 1,\n  \"device_name\": \"Intozi Camera 1\",\n  \"device_unique_key\": \"de21ba00-c4e2-474c-9106-b3bcc50e735f\",\n  \"group_id\": \"Gate-A\",\n  \"latitude\": \"12\",\n  \"longitude\": \"14\",\n  \"cam_id\": 3,\n  \"transaction_id\": {{transaction_id}},\n  \"color\": \"White\",\n  \"event_image\": \"/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==\",\n  \"vehicle_number\": \"UP32AB1234\",\n  \"triple_riding\": false,\n  \"vehicle_class\": \"car\",\n  \"no_helmet\": false,\n  \"plate_image\": \"/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==\",\n  \"no_seatbelt\": false,\n  \"driver_on_call_status\": false,\n  \"created_datetime\": \"2025-12-22T12:33:01.744613\"\n}"
+        },
+        "url": { "raw": "{{base_url}}/api/anpr", "host": ["{{base_url}}"], "path": ["api", "anpr"] }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 200', () => pm.response.to.have.status(200));",
+              "pm.test('event stored', () => pm.expect(pm.response.json().success).to.be.true);",
+              "// Bump the transaction id so the next run is not a duplicate.",
+              "pm.collectionVariables.set('transaction_id', Number(pm.collectionVariables.get('transaction_id')) + 1);"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "ANPR - duplicate transaction_id (409)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Authorization", "value": "{{api_key}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"application_name\": \"ANPR\",\n  \"application_id\": 1,\n  \"device_name\": \"Intozi Camera 1\",\n  \"device_unique_key\": \"de21ba00-c4e2-474c-9106-b3bcc50e735f\",\n  \"cam_id\": 3,\n  \"transaction_id\": 108,\n  \"event_image\": \"/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==\",\n  \"plate_image\": \"/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==\",\n  \"created_datetime\": \"2025-12-22T12:33:01.744613\"\n}"
+        },
+        "url": { "raw": "{{base_url}}/api/anpr", "host": ["{{base_url}}"], "path": ["api", "anpr"] }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": ["pm.test('status is 409', () => pm.response.to.have.status(409));"]
+          }
+        }
+      ]
+    },
+    {
+      "name": "ANPR - missing API key (401)",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": { "mode": "raw", "raw": "{}" },
+        "url": { "raw": "{{base_url}}/api/anpr", "host": ["{{base_url}}"], "path": ["api", "anpr"] }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": ["pm.test('status is 401', () => pm.response.to.have.status(401));"]
+          }
+        }
+      ]
+    },
+    {
+      "name": "ANPR - invalid payload (400)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Authorization", "value": "{{api_key}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"application_name\": \"ANPR\",\n  \"application_id\": \"not-a-number\",\n  \"device_name\": \"Intozi Camera 1\",\n  \"device_unique_key\": \"not-a-uuid\",\n  \"cam_id\": 3,\n  \"transaction_id\": 999,\n  \"vehicle_class\": \"spaceship\",\n  \"color\": \"Purple\",\n  \"event_image\": \"not-base64!!\",\n  \"plate_image\": \"not-base64!!\",\n  \"created_datetime\": \"22-12-2025\"\n}"
+        },
+        "url": { "raw": "{{base_url}}/api/anpr", "host": ["{{base_url}}"], "path": ["api", "anpr"] }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 400', () => pm.response.to.have.status(400));",
+              "pm.test('field errors returned', () => pm.expect(pm.response.json().errors).to.be.an('array'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Unknown route (404)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": { "raw": "{{base_url}}/api/does-not-exist", "host": ["{{base_url}}"], "path": ["api", "does-not-exist"] }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": ["pm.test('status is 404', () => pm.response.to.have.status(404));"]
+          }
+        }
+      ]
+    }
+  ]
+}

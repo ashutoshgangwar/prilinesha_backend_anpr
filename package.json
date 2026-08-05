@@ -1,29 +1,37 @@
 {
   "name": "prilinesha_backend_anpr",
-  "version": "1.0.0",
-  "description": "License Plate Recognition (LPR) parking/gate management backend",
-  "main": "index.js",
+  "version": "2.0.0",
+  "description": "Production-ready ANPR event ingestion API (Express + MongoDB)",
+  "main": "server.js",
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "scripts": {
-    "start": "node index.js",
-    "dev": "nodemon index.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node server.js",
+    "dev": "nodemon server.js"
   },
   "keywords": [
-    "lpr",
     "anpr",
-    "intozi",
-    "parking",
-    "gate"
+    "lpr",
+    "express",
+    "mongodb"
   ],
-  "author": "",
+  "author": "Prilinesha",
   "license": "ISC",
   "dependencies": {
-    "cors": "^2.8.6",
-    "dotenv": "^16.6.1",
-    "express": "^4.22.2",
-    "mongoose": "^8.24.0"
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.5.0",
+    "express-validator": "^7.2.1",
+    "helmet": "^8.0.0",
+    "mongoose": "^8.9.5",
+    "swagger-ui-express": "^5.0.1",
+    "uuid": "^11.0.5",
+    "winston": "^3.17.0",
+    "winston-daily-rotate-file": "^5.0.0"
   },
   "devDependencies": {
-    "nodemon": "^3.1.14"
+    "nodemon": "^3.1.9"
   }
 }

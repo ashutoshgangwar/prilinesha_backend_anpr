@@ -1,0 +1,185 @@
+const { body } = require('express-validator');
+
+const { VEHICLE_CLASSES, VEHICLE_COLORS } = require('../utils/constants');
+
+/**
+ * Validation rules for POST /api/anpr.
+ *
+ * Values are coerced here (numbers, booleans, dates) so the service layer can
+ * assume a clean, typed payload and focus purely on business rules.
+ */
+
+/** Booleans arrive as real booleans from most cameras and as "true"/"false" from some. */
+const optionalBoolean = (field) =>
+  body(field)
+    .optional({ nullable: true })
+    .isBoolean({ strict: false })
+    .withMessage(`${field} must be a boolean.`)
+    .toBoolean();
+
+/** Latitude/longitude are transmitted as strings; validate the numeric range. */
+const optionalCoordinate = (field, limit) =>
+  body(field)
+    .optional({ nullable: true, checkFalsy: true })
+    .isString()
+    .withMessage(`${field} must be a string.`)
+    .bail()
+    .trim()
+    .custom((value) => {
+      const parsed = Number(value);
+      if (!Number.isFinite(parsed) || Math.abs(parsed) > limit) {
+        throw new Error(`${field} must be a number between -${limit} and ${limit}.`);
+      }
+      return true;
+    });
+
+const anprEventRules = [
+  // ---- Source application ----
+  body('application_name')
+    .exists({ checkNull: true })
+    .withMessage('application_name is required.')
+    .bail()
+    .isString()
+    .withMessage('application_name must be a string.')
+    .bail()
+    .trim()
+    .notEmpty()
+    .withMessage('application_name cannot be empty.')
+    .isLength({ max: 100 })
+    .withMessage('application_name must be at most 100 characters.'),
+
+  body('application_id')
+    .exists({ checkNull: true })
+    .withMessage('application_id is required.')
+    .bail()
+    .isInt({ min: 0 })
+    .withMessage('application_id must be a non-negative integer.')
+    .toInt(),
+
+  // ---- Device ----
+  body('device_name')
+    .exists({ checkNull: true })
+    .withMessage('device_name is required.')
+    .bail()
+    .isString()
+    .withMessage('device_name must be a string.')
+    .bail()
+    .trim()
+    .notEmpty()
+    .withMessage('device_name cannot be empty.')
+    .isLength({ max: 150 })
+    .withMessage('device_name must be at most 150 characters.'),
+
+  body('device_unique_key')
+    .exists({ checkNull: true })
+    .withMessage('device_unique_key is required.')
+    .bail()
+    .trim()
+    .isUUID()
+    .withMessage('device_unique_key must be a valid UUID.'),
+
+  body('group_id')
+    .optional({ nullable: true })
+    .isString()
+    .withMessage('group_id must be a string.')
+    .bail()
+    .trim()
+    .isLength({ max: 100 })
+    .withMessage('group_id must be at most 100 characters.'),
+
+  // ---- Geo ----
+  optionalCoordinate('latitude', 90),
+  optionalCoordinate('longitude', 180),
+
+  // ---- Event identity ----
+  body('cam_id')
+    .exists({ checkNull: true })
+    .withMessage('cam_id is required.')
+    .bail()
+    .isInt({ min: 0 })
+    .withMessage('cam_id must be a non-negative integer.')
+    .toInt(),
+
+  body('transaction_id')
+    .exists({ checkNull: true })
+    .withMessage('transaction_id is required.')
+    .bail()
+    .isInt({ min: 0 })
+    .withMessage('transaction_id must be a non-negative integer.')
+    .toInt(),
+
+  // ---- Detection ----
+  body('vehicle_number')
+    .optional({ nullable: true, checkFalsy: true })
+    .isString()
+    .withMessage('vehicle_number must be a string.')
+    .bail()
+    .trim()
+    .toUpperCase()
+    .isLength({ min: 3, max: 20 })
+    .withMessage('vehicle_number must be between 3 and 20 characters.')
+    .matches(/^[A-Z0-9-]+$/)
+    .withMessage('vehicle_number may contain only letters, digits and hyphens.'),
+
+  body('vehicle_class')
+    .optional({ nullable: true, checkFalsy: true })
+    .isString()
+    .withMessage('vehicle_class must be a string.')
+    .bail()
+    .trim()
+    .toLowerCase()
+    .isIn(VEHICLE_CLASSES)
+    .withMessage(`vehicle_class must be one of: ${VEHICLE_CLASSES.join(', ')}.`),
+
+  body('color')
+    .optional({ nullable: true, checkFalsy: true })
+    .isString()
+    .withMessage('color must be a string.')
+    .bail()
+    .trim()
+    .isIn(VEHICLE_COLORS)
+    .withMessage(`color must be one of: ${VEHICLE_COLORS.join(', ')}.`),
+
+  // ---- Violation flags ----
+  optionalBoolean('triple_riding'),
+  optionalBoolean('no_helmet'),
+  optionalBoolean('no_seatbelt'),
+  optionalBoolean('driver_on_call_status'),
+
+  // ---- Images (optional; decoded and written to disk by the service layer) ----
+  // Omitted, null or "" all mean "no image" — the event is still stored.
+  body('event_image')
+    .optional({ nullable: true, checkFalsy: true })
+    .isString()
+    .withMessage('event_image must be a base64 string.'),
+
+  body('plate_image')
+    .optional({ nullable: true, checkFalsy: true })
+    .isString()
+    .withMessage('plate_image must be a base64 string.'),
+
+  // ---- Timestamp ----
+  body('created_datetime')
+    .exists({ checkNull: true })
+    .withMessage('created_datetime is required.')
+    .bail()
+    .isString()
+    .withMessage('created_datetime must be an ISO 8601 datetime string.')
+    .bail()
+    .trim()
+    .isISO8601()
+    .withMessage('created_datetime must be a valid ISO 8601 datetime (e.g. 2025-12-22T12:33:01.744613).')
+    .bail()
+    .customSanitizer((value) => {
+      // Cameras send a naive timestamp (no offset). Interpret it as UTC so the
+      // stored instant does not depend on the server's local timezone.
+      const hasTimezone = /(Z|[+-]\d{2}:?\d{2})$/i.test(value);
+      return new Date(hasTimezone ? value : `${value}Z`);
+    })
+    .custom((value) => {
+      if (Number.isNaN(value.getTime())) throw new Error('created_datetime is not a parsable datetime.');
+      return true;
+    }),
+];
+
+module.exports = { anprEventRules };
