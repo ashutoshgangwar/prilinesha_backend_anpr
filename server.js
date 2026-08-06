@@ -5,8 +5,11 @@ const logger = require('./utils/logger');
 const app = require('./app');
 const { connectDatabase, disconnectDatabase } = require('./config/database');
 const { ensureStorageDirectories } = require('./utils/imageStorage');
+const { ensureSuperAdmin } = require('./config/bootstrap');
 const VehicleLog = require('./models/VehicleLog');
 const RegisteredVehicle = require('./models/RegisteredVehicle');
+const User = require('./models/User');
+const Project = require('./models/Project');
 
 let server;
 let shuttingDown = false;
@@ -21,12 +24,28 @@ const start = async () => {
     await ensureStorageDirectories();
     await connectDatabase();
 
-    // Guarantees the unique transaction_id / vehicle_number indexes exist even
-    // when autoIndex is disabled in production.
-    await Promise.all([VehicleLog.syncIndexes(), RegisteredVehicle.syncIndexes()]);
+    // Guarantees the unique indexes (transaction_id, group_id + plate, email,
+    // group_id) exist even when autoIndex is disabled in production. syncIndexes
+    // also DROPS indexes no longer declared on a schema, which is what retires
+    // the old globally-unique plate index once registrations became per-project.
+    await Promise.all([
+      VehicleLog.syncIndexes(),
+      RegisteredVehicle.syncIndexes(),
+      User.syncIndexes(),
+      Project.syncIndexes(),
+    ]);
     logger.info('Indexes synchronised', {
-      models: [VehicleLog.modelName, RegisteredVehicle.modelName],
+      models: [
+        VehicleLog.modelName,
+        RegisteredVehicle.modelName,
+        User.modelName,
+        Project.modelName,
+      ],
     });
+
+    // Must run after the indexes exist, so the first super admin cannot be
+    // written without the unique email constraint in place.
+    await ensureSuperAdmin();
 
     server = app.listen(config.PORT, () => {
       logger.info('HTTP server listening', {

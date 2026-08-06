@@ -1,6 +1,7 @@
 const { body, query } = require('express-validator');
 
 const { VEHICLE_TYPES, REGISTRY_MAX_LIMIT } = require('../utils/constants');
+const { GROUP_ID_PATTERN, DEVICE_NAME_PATTERN } = require('./projectValidator');
 
 const toInclusiveEndOfDay = (value) => {
   const isDateOnly = /^\d{4}-\d{2}-\d{2}$/.test(value);
@@ -12,6 +13,20 @@ const toInclusiveEndOfDay = (value) => {
 };
 
 const registerVehicleRules = [
+  // Optional on the wire: a customer admin assigned to exactly one project may
+  // omit it and have their single project filled in — see requireProjectAccess
+  // in middleware/auth.js, which runs after this and is what actually decides
+  // the project. Anyone with access to several must name one.
+  body('group_id')
+    .optional({ nullable: true, checkFalsy: true })
+    .isString()
+    .withMessage('group_id must be a string.')
+    .bail()
+    .trim()
+    .toUpperCase()
+    .matches(GROUP_ID_PATTERN)
+    .withMessage('group_id is not a valid project identifier (e.g. ACME_MALL).'),
+
   body('vehicle_number')
     .exists({ checkNull: true })
     .withMessage('vehicle_number is required.')
@@ -68,9 +83,34 @@ const registerVehicleRules = [
       if (Number.isNaN(value.getTime())) throw new Error('valid_till is not a parsable date.');
       return true;
     }),
+
+  // Empty or omitted means "valid at every gate in the project", which is the
+  // normal case; a list restricts the registration to those gates only.
+  body('device_names')
+    .optional({ nullable: true })
+    .isArray({ max: 100 })
+    .withMessage('device_names must be an array of at most 100 device names.'),
+
+  body('device_names.*')
+    .isString()
+    .withMessage('each device name must be a string.')
+    .bail()
+    .trim()
+    .matches(DEVICE_NAME_PATTERN)
+    .withMessage('each device name must be 1-50 characters of letters, digits, dots, underscores or hyphens.'),
 ];
 
 const listVehiclesRules = [
+  query('group_id')
+    .optional({ nullable: true, checkFalsy: true })
+    .isString()
+    .withMessage('group_id must be a string.')
+    .bail()
+    .trim()
+    .toUpperCase()
+    .matches(GROUP_ID_PATTERN)
+    .withMessage('group_id is not a valid project identifier (e.g. ACME_MALL).'),
+
   query('search')
     .optional({ nullable: true, checkFalsy: true })
     .isString()

@@ -47,6 +47,14 @@ class AppError extends Error {
     return new AppError(401, message);
   }
 
+  /**
+   * Authenticated, but not allowed. Distinct from 401 on purpose: 401 means
+   * "log in", 403 means "logging in again will not help".
+   */
+  static forbidden(message = 'You do not have access to this resource.') {
+    return new AppError(403, message);
+  }
+
   static notFound(message = 'Resource not found') {
     return new AppError(404, message);
   }

@@ -1,6 +1,7 @@
 const { body, query } = require('express-validator');
 
 const { VEHICLE_CLASSES, VEHICLE_COLORS, VEHICLE_TYPES, FEED_MAX_LIMIT } = require('../utils/constants');
+const { GROUP_ID_PATTERN } = require('./projectValidator');
 
 /**
  * Validation rules for POST /api/anpr.
@@ -89,14 +90,21 @@ const anprEventRules = [
     .isUUID()
     .withMessage('device_unique_key must be a valid UUID.'),
 
+  // The project this event belongs to. Optional on the wire because a
+  // per-project API key already identifies the project and overrides whatever
+  // is sent here (see services/anprService.js) — it stays accepted so cameras
+  // on the legacy global key can still say which project they are posting for.
   body('group_id')
-    .optional({ nullable: true })
+    .optional({ nullable: true, checkFalsy: true })
     .isString()
     .withMessage('group_id must be a string.')
     .bail()
     .trim()
-    .isLength({ max: 100 })
-    .withMessage('group_id must be at most 100 characters.'),
+    .toUpperCase()
+    .matches(GROUP_ID_PATTERN)
+    .withMessage(
+      'group_id must be 2-50 characters of letters, digits, underscores or hyphens (e.g. ACME_MALL).'
+    ),
 
   // ---- Geo ----
   optionalCoordinate('latitude', 90),
@@ -238,6 +246,18 @@ const anprEventRules = [
  * 5-10 seconds.
  */
 const anprFeedQueryRules = [
+  // Only narrows within what the key already grants: a per-project key that
+  // names a different project is rejected with 403, not silently widened.
+  query('group_id')
+    .optional({ nullable: true, checkFalsy: true })
+    .isString()
+    .withMessage('group_id must be a string.')
+    .bail()
+    .trim()
+    .toUpperCase()
+    .matches(GROUP_ID_PATTERN)
+    .withMessage('group_id is not a valid project identifier (e.g. ACME_MALL).'),
+
   query('cursor')
     .optional({ nullable: true, checkFalsy: true })
     .isString()

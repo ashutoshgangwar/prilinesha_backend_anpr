@@ -70,6 +70,30 @@ const config = {
 
   API_KEY: required('API_KEY', { hint: 'shared secret sent in the Authorization header' }),
 
+  // ---- Dashboard authentication (JWT) ----
+  JWT_SECRET: required('JWT_SECRET', {
+    hint: 'signing key for dashboard access tokens; at least 32 characters',
+  }),
+  JWT_EXPIRES_IN: optional('JWT_EXPIRES_IN', '12h'),
+  JWT_ISSUER: optional('JWT_ISSUER', 'prilinesha-anpr'),
+
+  // Work factor for password hashing. 12 is ~250ms on modern hardware — high
+  // enough to make offline cracking expensive, low enough for a login endpoint.
+  BCRYPT_ROUNDS: asInt('BCRYPT_ROUNDS', 12, { min: 10, max: 15 }),
+
+  // ---- First super admin (seeded on boot, only when none exists) ----
+  SUPER_ADMIN_EMAIL: optional('SUPER_ADMIN_EMAIL', ''),
+  SUPER_ADMIN_PASSWORD: optional('SUPER_ADMIN_PASSWORD', ''),
+  SUPER_ADMIN_NAME: optional('SUPER_ADMIN_NAME', 'Super Admin'),
+
+  // Public signup. Turn off once every customer admin has been created, so the
+  // endpoint cannot be used to enumerate or spam the user table.
+  SIGNUP_ENABLED: optional('SIGNUP_ENABLED', 'true') === 'true',
+
+  // Attempts per IP per window on /api/auth/login and /api/auth/signup.
+  AUTH_RATE_LIMIT_WINDOW_MS: asInt('AUTH_RATE_LIMIT_WINDOW_MS', 15 * 60 * 1000, { min: 1000 }),
+  AUTH_RATE_LIMIT_MAX: asInt('AUTH_RATE_LIMIT_MAX', 10, { min: 1 }),
+
   UPLOAD_DIR: path.resolve(process.cwd(), optional('UPLOAD_DIR', './uploads')),
   UPLOAD_PUBLIC_PATH: optional('UPLOAD_PUBLIC_PATH', '/uploads'),
   SERVE_UPLOADS: optional('SERVE_UPLOADS', 'true') === 'true',
@@ -103,6 +127,25 @@ const config = {
 // than none because it looks configured.
 if (config.IS_PRODUCTION && /change-me|your_api_key|secret/i.test(config.API_KEY || '')) {
   errors.push('API_KEY still holds a placeholder value; generate a real secret before deploying');
+}
+
+// A short JWT secret is brute-forceable offline against any captured token.
+if (config.JWT_SECRET && config.JWT_SECRET.length < 32) {
+  errors.push('JWT_SECRET must be at least 32 characters');
+}
+
+if (config.IS_PRODUCTION && /change-me|replace-with|placeholder/i.test(config.JWT_SECRET || '')) {
+  errors.push('JWT_SECRET still holds a placeholder value; generate a real secret before deploying');
+}
+
+// A half-configured bootstrap silently creates no super admin, which looks like
+// a broken login rather than a missing variable.
+if (Boolean(config.SUPER_ADMIN_EMAIL) !== Boolean(config.SUPER_ADMIN_PASSWORD)) {
+  errors.push('SUPER_ADMIN_EMAIL and SUPER_ADMIN_PASSWORD must be set together (or both left empty)');
+}
+
+if (config.SUPER_ADMIN_PASSWORD && config.SUPER_ADMIN_PASSWORD.length < 8) {
+  errors.push('SUPER_ADMIN_PASSWORD must be at least 8 characters');
 }
 
 if (errors.length) {

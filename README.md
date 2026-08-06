@@ -11,13 +11,16 @@ metadata in MongoDB.
 | Area | Implementation |
 | --- | --- |
 | Architecture | Clean layering — route → middleware → validator → controller → service → model/storage |
-| Auth | Shared API key in the `Authorization` header, compared in constant time |
+| Multi-tenancy | Every record is scoped to a **project** (`group_id`); no query runs unscoped except for a super admin |
+| Dashboard auth | Email + password → JWT; user reloaded per request, so revocation is immediate |
+| Roles | `super_admin` (internal) and `admin` (customer), expressed as permissions so new APIs need no new role |
+| Camera auth | Per-project API key (`pk_…`) binds a camera to one project; legacy shared `API_KEY` still accepted |
 | Validation | `express-validator` rules with typed coercion and per-field error messages |
 | Images | Optional base64 decode, magic-byte check, size cap, unique filenames, rollback on failure |
-| Idempotency | Unique index on `transaction_id`; replays return `409` |
-| Intozi feed | `GET /api/anpr/feed`, polled every 5–10 s; keyset cursor delivers each event exactly once |
+| Idempotency | Unique index on `group_id + transaction_id`; replays return `409` |
+| Intozi feed | `GET /api/anpr/feed`, polled every 5–10 s; keyset cursor delivers each event exactly once, scoped to the key's project |
 | Vehicle registry | Dashboard adds a vehicle with a `valid_till`; expiry flips detections to `unregistered` with no cron job |
-| Errors | Centralized handler with a single response envelope (`400/401/404/409/413/429/500`) |
+| Errors | Centralized handler with a single response envelope (`400/401/403/404/409/413/429/500`) |
 | Logging | Winston, daily-rotated files + console, request ids, base64 payloads redacted |
 | Security | Helmet, CORS, per-IP rate limiting, 15 MB body cap, NoSQL-operator sanitizing |
 | Ops | Env validation at boot, Mongo connect retry with backoff, graceful shutdown, health + readiness probes |
@@ -41,10 +44,15 @@ cd prilinesha_backend_anpr
 npm install
 
 cp .env.example .env
-# then edit .env — MONGO_URI and API_KEY are required
+# then edit .env — MONGO_URI, API_KEY and JWT_SECRET are required
 
-# generate a strong API key
-node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+# generate the two secrets
+node -e "console.log('API_KEY   =', require('crypto').randomBytes(32).toString('hex'))"
+node -e "console.log('JWT_SECRET=', require('crypto').randomBytes(48).toString('hex'))"
+
+# set the first super admin so somebody can log in and create projects
+#   SUPER_ADMIN_EMAIL=admin@prilinesha.com
+#   SUPER_ADMIN_PASSWORD=<a real password>
 
 npm run dev     # nodemon, development
 npm start       # production
@@ -53,7 +61,22 @@ npm start       # production
 The server refuses to boot with an invalid `.env` and prints exactly which variables are wrong.
 
 On startup it creates `uploads/event-images/`, `uploads/plate-images/` and `logs/`, connects to
-MongoDB (retrying with exponential backoff) and synchronises the indexes.
+MongoDB (retrying with exponential backoff), synchronises the indexes and — **only if no super
+admin exists yet** — seeds one from `SUPER_ADMIN_EMAIL` / `SUPER_ADMIN_PASSWORD`. Once one exists
+the seed is skipped entirely, so leaving those variables set cannot resurrect a deleted account or
+undo a password change. Log in, change the password, then clear `SUPER_ADMIN_PASSWORD`.
+
+### Upgrading a database that predates projects
+
+`group_id` is now required on registered vehicles, so rows written before this change are invisible
+to every scoped query. Create the project they belong to, then:
+
+```bash
+node scripts/backfillGroupId.js ACME_MALL           # dry run — reports what it would change
+node scripts/backfillGroupId.js ACME_MALL --apply   # writes
+```
+
+Safe to re-run: it only touches documents that have no `group_id`.
 
 ---
 
@@ -67,7 +90,17 @@ MongoDB (retrying with exponential backoff) and synchronises the indexes.
 | `MONGO_MAX_RETRIES` | no | `10` | Connection attempts before aborting boot |
 | `MONGO_RETRY_DELAY_MS` | no | `3000` | Base backoff delay (doubles, capped at 30 s) |
 | `MONGO_SERVER_SELECTION_TIMEOUT_MS` | no | `10000` | Driver server-selection timeout |
-| `API_KEY` | **yes** | — | Secret cameras send in `Authorization` |
+| `API_KEY` | **yes** | — | Legacy shared camera secret — **unscoped**, reads every project. Prefer per-project keys. |
+| `JWT_SECRET` | **yes** | — | Signs dashboard tokens; min 32 chars. Changing it logs everyone out. |
+| `JWT_EXPIRES_IN` | no | `12h` | Access-token lifetime |
+| `JWT_ISSUER` | no | `prilinesha-anpr` | `iss` claim, verified on every token |
+| `BCRYPT_ROUNDS` | no | `12` | Password hashing cost (10–15) |
+| `SIGNUP_ENABLED` | no | `true` | Allow `POST /api/auth/signup`. Set `false` once all accounts exist. |
+| `AUTH_RATE_LIMIT_WINDOW_MS` | no | `900000` | Login/signup rate-limit window (15 min) |
+| `AUTH_RATE_LIMIT_MAX` | no | `10` | Failed login/signup attempts per window per IP |
+| `SUPER_ADMIN_EMAIL` | no | — | Seeds the first super admin, only when none exists |
+| `SUPER_ADMIN_PASSWORD` | no | — | Required together with the email; min 8 chars |
+| `SUPER_ADMIN_NAME` | no | `Super Admin` | Display name for the seeded account |
 | `UPLOAD_DIR` | no | `./uploads` | Root directory for stored images |
 | `UPLOAD_PUBLIC_PATH` | no | `/uploads` | URL prefix images are served under |
 | `SERVE_UPLOADS` | no | `true` | Serve `UPLOAD_DIR` statically |
@@ -85,30 +118,219 @@ MongoDB (retrying with exponential backoff) and synchronises the indexes.
 
 ---
 
-## How the three surfaces fit together
+## Tenancy: projects, gates and users
+
+> 📐 **[docs/SYSTEM-FLOW.md](docs/SYSTEM-FLOW.md)** has the same material as flow diagrams — the auth
+> pipeline, the onboarding sequence, tenant isolation and the registered/unregistered decision.
+
+Everything hangs off one identifier: **`group_id`**, the project. It is the value the customer types
+into their Intozi configuration and that arrives on every event.
 
 ```
- Internal dashboard              This API                        Intozi server
- ─────────────────────           ─────────────────────           ─────────────────────
- POST /api/vehicles  ─────────►  RegisteredVehicle
- (name, phone, plate,            (plate → valid_till)
-  valid_till)                            │
-                                         │ looked up at detection time
- GET  /api/vehicles  ◄────────           ▼
- (table + status)                VehicleLog.vehicle_type
-                                         │
-       Intozi camera ──────────►         │
-       POST /api/anpr                    ▼
-                                 GET /api/anpr/feed  ─────────►  polls every 5–10 s
-                                 (plate + registered?)
+Project  ACME_MALL  ("Acme Mall Parking")
+  ├── api_key           pk_ACMEMALL_9f2c…      ← installed on the customer's Intozi server
+  ├── devices           entry1, exit1, exit2   ← the gates; device_name on every event
+  ├── registered vehicles                      ← who is allowed in, until when
+  ├── detection events                         ← what the cameras saw
+  └── users             ravi@acmemall.com      ← the customer admins who can see all of the above
 ```
 
-A plate is **registered** only while a dashboard registration covers it. The moment `valid_till`
-passes, the next detection is reported to Intozi as **unregistered** — nothing has to expire it.
+Nothing is shared between projects. The same plate registered under `ACME_MALL` and `BLUE_FACTORY`
+is two independent records, and neither project can see the other's.
+
+### The two roles
+
+| | `super_admin` (you) | `admin` (your customer) |
+| --- | --- | --- |
+| Scope | Every project, including ones created later | Only the projects assigned to them |
+| Create projects & issue API keys | ✅ | ❌ |
+| Manage gates (`device_name`) | ✅ | ✅ *(own projects)* |
+| Register vehicles | ✅ | ✅ *(own projects)* |
+| Create users, assign projects, reset passwords | ✅ | ❌ |
+
+Routes check **permissions**, not roles — see `PERMISSIONS` and `ROLE_PERMISSIONS` in
+[utils/constants.js](utils/constants.js). Adding an API later means adding one permission entry and
+listing it under whichever roles should have it; no route or middleware changes.
+
+### End-to-end flow
+
+```
+ ① super admin                    This API                        ⑤ Intozi server
+ ─────────────────────            ─────────────────────           ─────────────────────
+ POST /api/auth/login   ────────►  JWT
+ POST /api/projects     ────────►  Project ACME_MALL
+                                   + gates entry1/exit1
+                                   + api_key pk_…       ─────────► installed on site
+ ② customer
+ POST /api/auth/signup  ────────►  User (admin, projects: [])   ← account, but no access
+
+ ③ super admin
+ PUT /api/users/{id}/projects ──►  User.projects = ["ACME_MALL"] ← the access grant
+                                                                    (live on the next request)
+ ④ customer
+ POST /api/vehicles     ────────►  RegisteredVehicle
+ (plate, name, valid_till)         (ACME_MALL + plate → valid_till)
+                                            │
+ GET  /api/vehicles     ◄────────           │ looked up at detection time
+ (their project only)                       ▼
+                                    VehicleLog.vehicle_type
+       camera ──────────────────►           │
+       POST /api/anpr                       ▼
+       (Bearer pk_…)               GET /api/anpr/feed  ─────────►  polls every 5–10 s
+                                   (plate + registered?)             ACME_MALL events only
+```
+
+A plate is **registered** only while a registration *in that project* covers it. The moment
+`valid_till` passes, the next detection is reported as **unregistered** — nothing has to expire it.
+
+### What stops the tenants leaking into each other
+
+- A customer admin's queries are filtered by their `projects` list. An unassigned account gets
+  `{ $in: [] }`, which matches nothing — never everything.
+- Naming a project outside your scope is a `403`, on reads and writes alike.
+- A per-project API key ignores any `group_id` in the request body, so a key leaked from one site
+  cannot write into — or read — another customer's data.
+- Access is re-read from the database on every request rather than trusted from the token, so
+  removing a project, changing a role or deactivating an account takes effect immediately instead of
+  whenever the token happens to expire.
 
 ---
 
 ## API
+
+| Endpoint | Auth | Who |
+| --- | --- | --- |
+| `POST /api/auth/signup` | — | anyone (creates an `admin` with no access) |
+| `POST /api/auth/login` | — | any user |
+| `GET /api/auth/me` | Bearer JWT | any user |
+| `POST /api/auth/change-password` | Bearer JWT | any user |
+| `POST /api/projects` | Bearer JWT | super admin |
+| `GET /api/projects` · `GET /api/projects/{group_id}` | Bearer JWT | scoped to the caller |
+| `PATCH /api/projects/{group_id}` | Bearer JWT | super admin |
+| `POST /api/projects/{group_id}/rotate-key` | Bearer JWT | super admin |
+| `POST·PATCH·DELETE /api/projects/{group_id}/devices…` | Bearer JWT | scoped to the caller |
+| `POST /api/users` · `GET /api/users…` | Bearer JWT | super admin |
+| `PUT /api/users/{id}/projects` | Bearer JWT | super admin |
+| `PATCH /api/users/{id}/role` · `/status` | Bearer JWT | super admin |
+| `POST /api/users/{id}/reset-password` | Bearer JWT | super admin |
+| `POST /api/vehicles` · `GET /api/vehicles` | Bearer JWT | scoped to the caller |
+| `POST /api/anpr` · `GET /api/anpr/feed` | API key | camera / Intozi |
+
+Full request and response schemas are in Swagger at `/api-docs`.
+
+---
+
+### `POST /api/auth/signup`
+
+Creates a dashboard account. The role is **forced to `admin`** and the project list starts empty —
+a `role` in the body is ignored, so this endpoint cannot mint a super admin. The user can log in
+straight away but sees nothing until a super admin assigns them a project.
+
+```json
+{ "name": "Ravi Sharma", "email": "ravi@acmemall.com", "password": "AcmePass123" }
+```
+
+`201` returns the user and a token. `403` if `SIGNUP_ENABLED=false`, `409` if the email is taken.
+
+---
+
+### `POST /api/auth/login`
+
+```json
+{ "email": "ravi@acmemall.com", "password": "AcmePass123" }
+```
+
+```json
+{
+  "success": true,
+  "message": "Logged in successfully.",
+  "data": {
+    "user": {
+      "id": "6a7378aa86d8e0aa080d4f95",
+      "name": "Ravi Sharma",
+      "role": "admin",
+      "group_ids": ["ACME_MALL"],
+      "projects": [{ "group_id": "ACME_MALL", "project_name": "Acme Mall Parking", "is_active": true }],
+      "permissions": ["project:read", "project:device_manage", "vehicle:read", "vehicle:write", "event:read"]
+    },
+    "token": "eyJhbGciOiJIUzI1NiIs…",
+    "token_type": "Bearer",
+    "expires_in": "12h"
+  }
+}
+```
+
+`group_ids` is the literal string `"ALL"` for a super admin, who is scoped to every project
+including ones created later. `permissions` lets the dashboard hide actions the role cannot perform
+— it is never the enforcement point, which is always server-side.
+
+A wrong email and a wrong password return the identical `401`, and take comparable time, so the
+endpoint cannot be used to discover which addresses are registered.
+
+---
+
+### `POST /api/projects`
+
+Super admin only. Creates the tenant and issues the Intozi credential.
+
+```json
+{
+  "group_id": "ACME_MALL",
+  "project_name": "Acme Mall Parking",
+  "customer_name": "Acme Retail Pvt Ltd",
+  "devices": [
+    { "device_name": "entry1", "direction": "entry" },
+    { "device_name": "exit1",  "direction": "exit"  },
+    { "device_name": "exit2",  "direction": "exit"  }
+  ]
+}
+```
+
+```json
+{
+  "success": true,
+  "warning": "Store this api_key now — it is shown once and cannot be retrieved later.",
+  "data": {
+    "project": { "group_id": "ACME_MALL", "device_count": 3, "api_key_last4": "8b1c", "...": "..." },
+    "api_key": "pk_ACMEMALL_9f2c1e8a4b7d0c3e6f5a2b9d8c7e4f1a0b3c6d9e2f5a8b1c",
+    "intozi_setup": {
+      "group_id": "ACME_MALL",
+      "post_url": "/api/anpr",
+      "feed_url": "/api/anpr/feed",
+      "authorization_header": "Bearer pk_ACMEMALL_9f2c…"
+    }
+  }
+}
+```
+
+**The `api_key` is shown once.** Only its SHA-256 is stored, so a lost key must be rotated
+(`POST /api/projects/{group_id}/rotate-key`), not recovered — and rotating breaks the cameras until
+the new key reaches the site.
+
+`group_id` is immutable: it is stamped on every event already ingested and configured on the
+cameras themselves.
+
+---
+
+### `PUT /api/users/{id}/projects`
+
+Super admin only. **This is the access grant** — the moment a signed-up customer can see anything.
+
+```json
+{ "group_ids": ["ACME_MALL"], "mode": "replace" }
+```
+
+`mode` is `replace` (default), `add` or `remove`. Assigning a `group_id` that does not exist is
+rejected with `400`, because a typo would silently grant access to nothing and look like a bug.
+
+Takes effect on the user's **very next request** — no re-login. The same is true in reverse: removing
+a project, demoting a role, or `PATCH /api/users/{id}/status` with `is_active: false` revokes access
+immediately rather than when the token expires.
+
+Safety rails: you cannot change your own role, deactivate your own account, or demote the last
+active super admin.
+
+---
 
 ### `POST /api/anpr`
 
@@ -118,8 +340,18 @@ Ingests one detection event.
 
 ```
 Content-Type: application/json
-Authorization: <API_KEY>          # "Bearer <API_KEY>" and "x-api-key" also accepted
+Authorization: Bearer pk_ACMEMALL_9f2c…   # per-project key; raw and "x-api-key" also accepted
 ```
+
+The event is filed under the project the key belongs to. A `group_id` in the body **cannot override
+that** — it is only read when the legacy unscoped `API_KEY` is used.
+
+`transaction_id` is idempotent **within a project**, so two customers may legitimately both send
+`4471`.
+
+A `device_name` the project has never seen is auto-registered and flagged `auto_registered: true`
+rather than rejected — dropping a live event is a worse failure than an unexpected row in the device
+table, and the flag is what surfaces it for review.
 
 **Body**
 
@@ -127,9 +359,9 @@ Authorization: <API_KEY>          # "Bearer <API_KEY>" and "x-api-key" also acce
 {
   "application_name": "ANPR",
   "application_id": 1,
-  "device_name": "Intozi Camera 1",
+  "device_name": "entry1",
   "device_unique_key": "de21ba00-c4e2-474c-9106-b3bcc50e735f",
-  "group_id": "Gate-A",
+  "group_id": "ACME_MALL",
   "latitude": "12",
   "longitude": "14",
   "cam_id": 3,
@@ -162,11 +394,11 @@ Authorization: <API_KEY>          # "Bearer <API_KEY>" and "x-api-key" also acce
 | `device_name` | yes | string, ≤ 150 chars |
 | `device_unique_key` | yes | UUID |
 | `cam_id` | yes | integer ≥ 0 |
-| `transaction_id` | yes | integer ≥ 0, unique across all events |
+| `transaction_id` | yes | integer ≥ 0, unique **within the project** |
 | `created_datetime` | yes | ISO 8601; **no offset is read as UTC** |
 | `event_image` | no | base64 JPG/PNG (data-URI prefix optional); omitted → `event_image_path: null` |
 | `plate_image` | no | base64 JPG/PNG (data-URI prefix optional); omitted → `plate_image_path: null` |
-| `group_id` | no | string, ≤ 100 chars |
+| `group_id` | no | Project id, `A-Z 0-9 _ -`. **Ignored when a per-project key is used** — the key decides. |
 | `latitude` / `longitude` | no | numeric string within ±90 / ±180 |
 | `vehicle_number` | no | 3–20 chars, `A-Z 0-9 -`, stored uppercase |
 | `vehicle_class` | no | `bus` \| `car` \| `bike` \| `truck` \| `auto` |
@@ -179,12 +411,14 @@ Authorization: <API_KEY>          # "Bearer <API_KEY>" and "x-api-key" also acce
 | `email` | no | valid email, ≤ 254 chars, stored lowercase |
 | `triple_riding`, `no_helmet`, `no_seatbelt`, `driver_on_call_status` | no | boolean, default `false` |
 
-**How `vehicle_type` is decided** — the camera does not get the last word:
+**How `vehicle_type` is decided** — the camera does not get the last word. The lookup is scoped to
+the detecting project, so a vehicle registered at one customer's site is a stranger at another's:
 
-| Plate on the registry? | Result |
+| Plate on **this project's** registry? | Result |
 | --- | --- |
 | Yes, `valid_till` not passed at `created_datetime` | `registered` |
 | Yes, but expired | `unregistered` — even if the payload says `"vehicle_type": "registered"` |
+| Yes, but restricted to gates that exclude this `device_name` | `unregistered` |
 | No | Falls back to the payload's `vehicle_type`, else `unregistered` |
 
 Status is judged at **detection time**, not at read time, so the stored event stays an honest record
@@ -199,6 +433,7 @@ detections.
   "message": "ANPR event stored successfully.",
   "data": {
     "id": "6789ab01c2d3e4f567890123",
+    "group_id": "ACME_MALL",
     "transaction_id": 108,
     "vehicle_number": "UP32AB1234",
     "vehicle_type": "registered",
@@ -225,8 +460,9 @@ detections.
 | --- | --- |
 | `400` | Validation failed, malformed JSON, or undecodable/non-image base64 |
 | `401` | Missing or invalid API key |
+| `403` | The project is deactivated |
 | `404` | Unknown route |
-| `409` | `transaction_id` already ingested |
+| `409` | `transaction_id` already ingested **for this project** |
 | `413` | Body exceeds `JSON_BODY_LIMIT` |
 | `429` | Rate limit exceeded |
 | `500` | Unexpected server error |
@@ -238,10 +474,15 @@ whether the vehicle is registered; every other field is returned as `null` **by 
 database may well hold owner name, contact number, email, driver name, model and creation time, but
 this feed never discloses them.
 
+**Scoped to the key's project.** A per-project key returns that project's events only — no parameter
+needed, and none accepted that would widen it. Naming a different `group_id` is a `403`, not a wider
+read, so a key leaked from one site cannot be used to read another customer's plates. Only the
+legacy shared `API_KEY` sees every project.
+
 **Headers**
 
 ```
-Authorization: <API_KEY>
+Authorization: Bearer pk_ACMEMALL_9f2c…
 ```
 
 **Query parameters**
@@ -252,6 +493,7 @@ Authorization: <API_KEY>
 | `since` | – | ISO 8601; alternative cold start. Ignored when `cursor` is sent. |
 | `limit` | `100` | Integer 1–1000 |
 | `vehicle_type` | – | `registered` \| `unregistered` — optional filter |
+| `group_id` | – | Narrows *within* what the key already grants; `403` if it names anything else |
 
 **200 OK**
 
@@ -260,6 +502,7 @@ Authorization: <API_KEY>
   "success": true,
   "message": "Vehicle feed fetched successfully.",
   "count": 1,
+  "group_id": "ACME_MALL",
   "next_cursor": "MjAyNi0wOC0wNVQxNTo1MjozMi4yNDhafDZhNzM1YzQwYTczYjNhZTMzY2MwODI5ZA",
   "has_more": false,
   "data": [
@@ -295,21 +538,25 @@ step 2 hold under concurrent ingestion.
 | Status | When |
 | --- | --- |
 | `200` | Page returned (an empty `data` array just means nothing new) |
-| `400` | Malformed `cursor`, `since`, `limit` or `vehicle_type` |
+| `400` | Malformed `cursor`, `since`, `limit`, `vehicle_type` or `group_id` |
 | `401` | Missing or invalid API key |
+| `403` | `group_id` outside the key's scope, or the project is deactivated |
 | `429` | Rate limit exceeded — see `RATE_LIMIT_MAX` |
 
 > A 5-second interval is 12 requests/minute per poller, well inside the default limit of 300/minute.
 
 ### `POST /api/vehicles`
 
-Internal dashboard: register a vehicle, or renew one that is already on the registry.
+Dashboard: register a vehicle in a project, or renew one already on that project's registry.
+Authenticated with a **dashboard token**, not the camera API key — "which vehicles may I see?" is now
+a per-user question.
 
 ```bash
 curl -X POST http://localhost:5050/api/vehicles \
   -H "Content-Type: application/json" \
-  -H "Authorization: $API_KEY" \
+  -H "Authorization: Bearer $TOKEN" \
   -d '{
+    "group_id": "ACME_MALL",
     "vehicle_number": "MH12AB1234",
     "name": "Ramesh Kumar",
     "phone_number": "+91 9876543210",
@@ -321,10 +568,12 @@ curl -X POST http://localhost:5050/api/vehicles \
 
 | Field | Required | Rule |
 | --- | --- | --- |
-| `vehicle_number` | yes | 3–20 chars, `A-Z 0-9 -`, stored uppercase — unique |
+| `group_id` | conditional | Optional if you are assigned to exactly **one** project — yours is used. Required otherwise. |
+| `vehicle_number` | yes | 3–20 chars, `A-Z 0-9 -`, stored uppercase — unique **within the project** |
 | `name` | yes | string, ≤ 150 chars |
 | `phone_number` | yes | 6–20 characters of digits, optional `+`, spaces/hyphens allowed |
 | `valid_till` | yes | `YYYY-MM-DD` or ISO 8601 datetime; a plain date covers the **whole** day |
+| `device_names` | no | Restrict to specific gates. Empty/omitted = every gate in the project. |
 
 **201 Created** (a new plate) / **200 OK** (an existing plate was renewed — `created: false`)
 
@@ -335,7 +584,9 @@ curl -X POST http://localhost:5050/api/vehicles \
   "created": true,
   "data": {
     "id": "6a7378aa86d8e0aa080d4f95",
+    "group_id": "ACME_MALL",
     "vehicle_number": "MH12AB1234",
+    "device_names": [],
     "name": "Ramesh Kumar",
     "phone_number": "+91 9876543210",
     "valid_till": "2027-03-31T23:59:59.999Z",
@@ -348,23 +599,29 @@ curl -X POST http://localhost:5050/api/vehicles \
 }
 ```
 
-A plate is unique, so **re-posting one renews it** rather than failing — that is how an expired
-vehicle is brought back, and it keeps exactly one row per plate. `created` tells the dashboard which
-happened. Posting a `valid_till` that is already in the past is allowed; it simply stores a vehicle
-whose `status` is `unregistered`.
+A plate is unique **within a project**, so re-posting one there **renews it** rather than failing —
+that is how an expired vehicle is brought back, and it keeps exactly one row per plate per project.
+`created` tells the dashboard which happened. The same plate under a different `group_id` is an
+entirely separate record. Posting a `valid_till` that is already in the past is allowed; it simply
+stores a vehicle whose `status` is `unregistered`.
+
+Writing into a project you are not assigned to returns `403`.
 
 ### `GET /api/vehicles`
 
-The dashboard table. Offset paging with a row count (unlike the Intozi feed's cursor, a table needs
-page numbers).
+The dashboard table, restricted to the caller's projects: a super admin sees every project, a
+customer admin only their assigned ones, an unassigned account an empty list. Add `?group_id=` to
+narrow to one. Offset paging with a row count (unlike the Intozi feed's cursor, a table needs page
+numbers).
 
 ```bash
-curl -H "Authorization: $API_KEY" \
+curl -H "Authorization: Bearer $TOKEN" \
   "http://localhost:5050/api/vehicles?search=MH12&status=registered&page=1&limit=25"
 ```
 
 | Param | Default | Rule |
 | --- | --- | --- |
+| `group_id` | – | Narrow to one project. `403` if it is outside your scope. |
 | `search` | – | Partial, case-insensitive match on vehicle number, name **or** phone |
 | `status` | – | `registered` (inside `valid_till`) \| `unregistered` (expired) |
 | `page` | `1` | Integer ≥ 1 |
@@ -379,6 +636,7 @@ curl -H "Authorization: $API_KEY" \
   "data": [
     {
       "id": "6a7378aa86d8e0aa080d4f96",
+      "group_id": "ACME_MALL",
       "vehicle_number": "DL01XY9999",
       "name": "Anita Sharma",
       "phone_number": "9812345678",
@@ -422,25 +680,64 @@ Returns `503` while MongoDB is unavailable — wire this to your load balancer.
 
 ## Quick test
 
-Register a vehicle from the dashboard side first — it is what makes the detection below come back
-as `registered`:
+The whole flow, start to finish.
+
+**1 · Log in as the super admin** (seeded from `SUPER_ADMIN_EMAIL` / `SUPER_ADMIN_PASSWORD`):
 
 ```bash
-curl -X POST http://localhost:5050/api/vehicles \
+TOKEN=$(curl -s -X POST http://localhost:5050/api/auth/login \
   -H "Content-Type: application/json" \
-  -H "Authorization: $API_KEY" \
-  -d '{"vehicle_number":"UP32AB1234","name":"Ramesh Kumar","phone_number":"+91 9876543210","valid_till":"2027-03-31"}'
+  -d '{"email":"admin@prilinesha.com","password":"<your password>"}' | jq -r .data.token)
 ```
 
-Then send a detection:
+**2 · Create the project and its gates.** Save the `api_key` — it is shown once:
+
+```bash
+curl -s -X POST http://localhost:5050/api/projects \
+  -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" \
+  -d '{
+    "group_id":"ACME_MALL",
+    "project_name":"Acme Mall Parking",
+    "devices":[{"device_name":"entry1","direction":"entry"},{"device_name":"exit1","direction":"exit"}]
+  }' | jq '{group_id:.data.project.group_id, api_key:.data.api_key}'
+
+PROJECT_KEY=pk_ACMEMALL_…   # paste it here
+```
+
+**3 · The customer signs up, then you grant them the project:**
+
+```bash
+USER_ID=$(curl -s -X POST http://localhost:5050/api/auth/signup \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Ravi Sharma","email":"ravi@acmemall.com","password":"AcmePass123"}' | jq -r .data.user.id)
+
+curl -s -X PUT http://localhost:5050/api/users/$USER_ID/projects \
+  -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" \
+  -d '{"group_ids":["ACME_MALL"]}' | jq .data.group_ids
+```
+
+**4 · The customer logs in and registers a vehicle** — this is what makes the detection below come
+back as `registered`. They are in exactly one project, so `group_id` can be omitted:
+
+```bash
+CUST=$(curl -s -X POST http://localhost:5050/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"ravi@acmemall.com","password":"AcmePass123"}' | jq -r .data.token)
+
+curl -s -X POST http://localhost:5050/api/vehicles \
+  -H "Content-Type: application/json" -H "Authorization: Bearer $CUST" \
+  -d '{"vehicle_number":"UP32AB1234","name":"Ramesh Kumar","phone_number":"+91 9876543210","valid_till":"2027-03-31"}' | jq .data
+```
+
+**5 · Send a detection as the camera would**, using the project key:
 
 ```bash
 curl -X POST http://localhost:5050/api/anpr \
   -H "Content-Type: application/json" \
-  -H "Authorization: $API_KEY" \
+  -H "Authorization: Bearer $PROJECT_KEY" \
   -d '{
     "application_name":"ANPR","application_id":1,
-    "device_name":"Intozi Camera 1",
+    "device_name":"entry1",
     "device_unique_key":"de21ba00-c4e2-474c-9106-b3bcc50e735f",
     "cam_id":3,"transaction_id":108,
     "vehicle_number":"UP32AB1234",
@@ -450,14 +747,17 @@ curl -X POST http://localhost:5050/api/anpr \
   }'
 ```
 
-Then read it back off the Intozi feed — first the newest page, then only what is new:
+The response should show `"vehicle_type": "registered"` and `"group_id": "ACME_MALL"`.
+
+**6 · Read it back off the Intozi feed** — first the newest page, then only what is new. The key
+scopes it to `ACME_MALL` automatically:
 
 ```bash
-# 1. cold start
-curl -s -H "Authorization: $API_KEY" "http://localhost:5050/api/anpr/feed?limit=5"
+# cold start
+curl -s -H "Authorization: Bearer $PROJECT_KEY" "http://localhost:5050/api/anpr/feed?limit=5"
 
-# 2. every later poll — reuse the next_cursor from the previous response
-curl -s -H "Authorization: $API_KEY" "http://localhost:5050/api/anpr/feed?cursor=<next_cursor>"
+# every later poll — reuse the next_cursor from the previous response
+curl -s -H "Authorization: Bearer $PROJECT_KEY" "http://localhost:5050/api/anpr/feed?cursor=<next_cursor>"
 ```
 
 A minimal poller:
@@ -465,11 +765,27 @@ A minimal poller:
 ```bash
 CURSOR=""
 while true; do
-  BODY=$(curl -s -H "Authorization: $API_KEY" "http://localhost:5050/api/anpr/feed?cursor=$CURSOR")
+  BODY=$(curl -s -H "Authorization: Bearer $PROJECT_KEY" "http://localhost:5050/api/anpr/feed?cursor=$CURSOR")
   echo "$BODY" | jq -c '.data[]'
   CURSOR=$(echo "$BODY" | jq -r '.next_cursor // empty')
   sleep 5
 done
+```
+
+**7 · Confirm the isolation holds.** All three of these must fail:
+
+```bash
+# the customer cannot reach another project
+curl -s -H "Authorization: Bearer $CUST" "http://localhost:5050/api/vehicles?group_id=BLUE_FACTORY" | jq .code   # FORBIDDEN
+
+# the customer cannot create projects or manage users
+curl -s -H "Authorization: Bearer $CUST" "http://localhost:5050/api/users" | jq .code                            # FORBIDDEN
+
+# revoking the project takes effect on the very next request, with no re-login
+curl -s -X PUT http://localhost:5050/api/users/$USER_ID/projects \
+  -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" \
+  -d '{"group_ids":["ACME_MALL"],"mode":"remove"}' > /dev/null
+curl -s -H "Authorization: Bearer $CUST" "http://localhost:5050/api/vehicles" | jq .count                        # 0
 ```
 
 ---
@@ -482,38 +798,61 @@ done
 ├── server.js                   # Boot: storage → Mongo (retry) → indexes → listen → graceful shutdown
 ├── config/
 │   ├── env.js                  # Environment validation & coercion (fails fast)
-│   └── database.js             # Mongo connect/disconnect, retry, connection state
+│   ├── database.js             # Mongo connect/disconnect, retry, connection state
+│   └── bootstrap.js            # Seeds the first super admin — only when none exists
 ├── routes/
-│   ├── anpr.js                 # POST /api/anpr, GET /api/anpr/feed
+│   ├── auth.js                 # signup, login, me, change-password
+│   ├── users.js                # User admin + project assignment (super admin)
+│   ├── projects.js             # Projects (group_id), gates, API-key rotation
 │   ├── vehicles.js             # POST /api/vehicles, GET /api/vehicles (dashboard)
+│   ├── anpr.js                 # POST /api/anpr, GET /api/anpr/feed (cameras)
 │   └── health.js               # GET /health, /health/ready
-├── controllers/
-│   ├── anprController.js       # Thin HTTP adapter
-│   └── vehicleController.js
+├── controllers/                # Thin HTTP adapters
+│   ├── authController.js
+│   ├── userController.js
+│   ├── projectController.js
+│   ├── vehicleController.js
+│   └── anprController.js
 ├── services/
-│   ├── anprService.js          # Ingestion (dedupe → images → insert → rollback) + Intozi feed
-│   └── vehicleService.js       # Registry CRUD + resolveVehicleStatus (registered/unregistered)
-├── validators/
-│   ├── anprValidator.js        # express-validator rules
-│   └── vehicleValidator.js
+│   ├── authService.js          # Signup, login, profile, password change
+│   ├── userService.js          # User admin; assignProjects IS the access grant
+│   ├── projectService.js       # Projects, gates, API keys, device auto-registration
+│   ├── vehicleService.js       # Registry CRUD + resolveVehicleStatus (registered/unregistered)
+│   └── anprService.js          # Ingestion (dedupe → images → insert → rollback) + Intozi feed
+├── validators/                 # express-validator rules
+│   ├── authValidator.js        # Password policy lives here, stated once
+│   ├── userValidator.js
+│   ├── projectValidator.js     # GROUP_ID_PATTERN / DEVICE_NAME_PATTERN — reused everywhere
+│   ├── vehicleValidator.js
+│   └── anprValidator.js
 ├── middleware/
-│   ├── apiKeyAuth.js           # Constant-time API key check
+│   ├── auth.js                 # JWT verify → authorize(permission) → project scoping
+│   ├── apiKeyAuth.js           # Per-project key lookup, or constant-time global key check
 │   ├── errorHandler.js         # 404 + centralized error handler
-│   ├── rateLimiter.js
+│   ├── rateLimiter.js          # General limiter + a much stricter one for login/signup
 │   ├── requestContext.js       # Request id, response time, request logging
 │   ├── sanitize.js             # Strips $-operators / dotted keys
 │   └── validate.js             # Runs rules → 400 with field errors
 ├── models/
+│   ├── User.js                 # Dashboard users; hashes passwords in a pre-save hook
+│   ├── Project.js              # Tenant: group_id, devices, hashed API key
 │   ├── VehicleLog.js           # Detection events — Mongoose schema + indexes
-│   └── RegisteredVehicle.js    # Dashboard registry (plate → holder + valid_till)
+│   └── RegisteredVehicle.js    # Registry (group_id + plate → holder + valid_till)
 ├── utils/
 │   ├── AppError.js             # Operational error with status code
 │   ├── asyncHandler.js
-│   ├── constants.js            # Vehicle classes / colors / types, feed masking & paging
+│   ├── constants.js            # ROLES, PERMISSIONS, ROLE_PERMISSIONS, feed masking & paging
+│   ├── jwt.js                  # Sign/verify access tokens
+│   ├── apiKeys.js              # Project key generation + SHA-256 hashing
 │   ├── feedCursor.js           # Opaque keyset cursor for the Intozi feed
 │   ├── imageStorage.js         # Base64 decode, write, rollback
 │   └── logger.js               # Winston (rotating files + console, redaction)
-├── docs/swagger.js             # OpenAPI 3.0 spec
+├── scripts/
+│   └── backfillGroupId.js      # One-off migration for pre-project databases
+├── docs/
+│   ├── swagger.js              # OpenAPI 3.0 spec
+│   ├── swaggerAuthPaths.js     # Auth / project / user paths (split for size)
+│   └── swaggerAuthSchemas.js   # Auth / project / user schemas
 ├── postman/                    # Postman collection
 ├── uploads/
 │   ├── event-images/
@@ -529,10 +868,11 @@ done
 
 | Index | Purpose |
 | --- | --- |
-| `transaction_id` (unique) | Idempotency — a retried delivery cannot duplicate a record |
-| `vehicle_number + created_datetime` | Plate search, newest first |
+| `group_id + transaction_id` (unique) | Idempotency — scoped, because a transaction id is only unique within one Intozi deployment |
+| `group_id + vehicle_number + created_datetime` | Plate search within a project, newest first |
 | `created_datetime` | Time-range reports |
-| `received_at + _id` | Intozi feed cursor paging |
+| `group_id + received_at + _id` | Intozi feed cursor paging, per project |
+| `received_at + _id` | The same cursor walk for an unscoped (global-key) read |
 
 `created_datetime` is the camera's timestamp; `received_at` is when this API accepted it.
 
@@ -549,13 +889,39 @@ therefore read back as `unregistered`.
 
 | Index | Purpose |
 | --- | --- |
-| `vehicle_number` (unique) | One row per plate — re-registering renews instead of duplicating |
-| `valid_till` | `status` filtering on the dashboard |
-| `createdAt` | Default listing order, newest first |
+| `group_id + vehicle_number` (unique) | One row per plate **per project** — re-registering renews instead of duplicating, while another project keeps its own independent record |
+| `group_id + valid_till` | `status` filtering on the dashboard |
+| `group_id + createdAt` | Default listing order, newest first |
 
 Registration status is **derived, never stored** — `valid_till` compared against the relevant instant
 (detection time when stamping an event, request time when listing the dashboard). There is no
 `is_active` flag to go stale and no scheduled job to expire anything.
+
+`Project` is the tenant record:
+
+| Index | Purpose |
+| --- | --- |
+| `group_id` (unique) | One project per identifier — this is what Intozi is told to send |
+| `api_key_hash` | Authenticating a camera is a lookup on every ingest, so it must be indexed |
+| `createdAt` | Default listing order |
+
+Only the SHA-256 of an API key is stored (`select: false`), plus its last 4 characters so the
+dashboard can say which key is installed on site without being able to reproduce it. SHA-256 rather
+than bcrypt is deliberate: the key is 192 bits of generated randomness, so there is no dictionary to
+defend against, and ingestion authenticates on every event — it has to be an indexed lookup.
+
+`User` holds dashboard accounts:
+
+| Index | Purpose |
+| --- | --- |
+| `email` (unique) | One account per address; stored lowercase so casing cannot fork an account |
+| `projects` | "Who has access to this project?" without scanning the collection |
+| `createdAt` | Default listing order |
+
+Passwords are bcrypt-hashed in a `pre('save')` hook rather than in the service, so no code path can
+write a plaintext password by forgetting a call, and `password_hash` is `select: false` so it cannot
+leak through a forgotten projection. `tokens_valid_from` retires every token issued before it —
+bumped on password change, role change and deactivation.
 
 ---
 
@@ -572,3 +938,14 @@ Registration status is **derived, never stored** — `valid_till` compared again
   close MongoDB, then exit — force-exits after `SHUTDOWN_TIMEOUT_MS`.
 - **Behind a proxy** set `TRUST_PROXY=1` (or the trusted subnet) so rate limiting sees real client IPs.
 - **Backups**: `uploads/` holds the only copy of each image; include it in your backup routine.
+- **Index sync on boot** also *drops* indexes no longer declared on a schema — that is what retires
+  the old globally-unique plate index once registrations became per-project.
+- **Lost project key**: rotate it (`POST /api/projects/{group_id}/rotate-key`). The old key stops
+  working immediately, so the cameras for that project fail until the new key reaches the site.
+- **Offboarding a customer**: `PATCH /api/projects/{group_id}` with `is_active: false` stops their
+  cameras posting and their feed being read, without deleting anything. Deactivating a *user*
+  (`PATCH /api/users/{id}/status`) revokes them on their next request while leaving their audit
+  trail intact — prefer both to deletion.
+- **Turn signup off** (`SIGNUP_ENABLED=false`) once every customer account exists; create the rest
+  with `POST /api/users`.
+- **Rotating `JWT_SECRET`** invalidates every issued token at once — that is the global logout.

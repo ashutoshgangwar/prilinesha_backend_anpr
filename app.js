@@ -9,6 +9,9 @@ const swaggerSpec = require('./docs/swagger');
 
 const anprRoutes = require('./routes/anpr');
 const vehicleRoutes = require('./routes/vehicles');
+const authRoutes = require('./routes/auth');
+const userRoutes = require('./routes/users');
+const projectRoutes = require('./routes/projects');
 const healthRoutes = require('./routes/health');
 
 const sanitize = require('./middleware/sanitize');
@@ -42,7 +45,8 @@ app.use(
 app.use(
   cors({
     origin: config.CORS_ORIGIN === '*' ? '*' : config.CORS_ORIGIN.split(',').map((o) => o.trim()),
-    methods: ['GET', 'POST', 'OPTIONS'],
+    // PUT/PATCH/DELETE are used by the dashboard's project and user admin.
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'x-api-key', 'X-Request-Id'],
     maxAge: 86400,
   })
@@ -74,8 +78,17 @@ if (config.SWAGGER_ENABLED) {
 // ---- Routes ----
 app.use('/health', healthRoutes);
 app.use('/api', apiLimiter);
-app.use('/api/anpr', anprRoutes);
+
+// Dashboard: JWT-authenticated, scoped to the caller's projects.
+app.use('/api/auth', authRoutes);
+app.use('/api/users', userRoutes);
+app.use('/api/projects', projectRoutes);
 app.use('/api/vehicles', vehicleRoutes);
+
+// Cameras / Intozi: API-key authenticated, scoped to the key's project.
+// Mounted at the API root, so Intozi posts to `/api` and polls `/api/feed`.
+// Registered after the dashboard routers above so their prefixes still win.
+app.use('/api', anprRoutes);
 
 app.get('/', (_req, res) => {
   res.json({
@@ -83,6 +96,14 @@ app.get('/', (_req, res) => {
     version: require(path.join(__dirname, 'package.json')).version,
     docs: config.SWAGGER_ENABLED ? '/api-docs' : null,
     health: '/health',
+    endpoints: {
+      auth: '/api/auth',
+      users: '/api/users',
+      projects: '/api/projects',
+      vehicles: '/api/vehicles',
+      anpr: '/api',
+      anprFeed: '/api/feed',
+    },
   });
 });
 

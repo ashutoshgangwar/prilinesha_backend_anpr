@@ -6,34 +6,89 @@ const {
   FEED_MAX_LIMIT,
   REGISTRY_DEFAULT_LIMIT,
   REGISTRY_MAX_LIMIT,
+  LIST_MAX_LIMIT,
+  ROLE_VALUES,
+  PERMISSIONS,
 } = require('../utils/constants');
+
+const { authPaths, projectPaths, userPaths } = require('./swaggerAuthPaths');
+const { authSchemas } = require('./swaggerAuthSchemas');
 
 /** OpenAPI 3.0 description of the public surface, served at /api-docs. */
 const swaggerSpec = {
   openapi: '3.0.3',
   info: {
     title: 'Prilinesha ANPR Ingestion API',
-    version: '2.0.0',
-    description:
-      'Receives ANPR (Automatic Number Plate Recognition) detection events from cameras, ' +
+    version: '3.0.0',
+    description: [
+      'Receives ANPR (Automatic Number Plate Recognition) detection events from cameras,',
       'stores the base64 event/plate images on disk and persists the event metadata in MongoDB.',
+      '',
+      '## Tenancy',
+      '',
+      'Everything is scoped to a **project**, identified by its `group_id` — the value the',
+      'customer configures in Intozi and that arrives on every event. A project owns its gates',
+      '(`device_name`: entry1, exit1, exit2 …), its registered vehicles and its detection events.',
+      '',
+      '## Two ways to authenticate',
+      '',
+      '| Caller | Credential | Scope |',
+      '| --- | --- | --- |',
+      '| Dashboard user | `Authorization: Bearer <JWT>` from `/api/auth/login` | `super_admin`: every project. `admin`: only assigned projects. |',
+      '| Intozi / camera | `Authorization: Bearer pk_…` (per-project API key) | Exactly one project. |',
+      '| Legacy camera | `Authorization: Bearer <API_KEY>` (shared secret) | Unscoped — every project. |',
+      '',
+      '## Roles',
+      '',
+      '- **super_admin** — internal Prilinesha staff. Creates projects, issues API keys, creates',
+      '  users and grants them project access. Holds every permission.',
+      '- **admin** — the customer\'s operator. Sees and manages only the projects assigned to them.',
+      '',
+      'Routes check *permissions*, not roles, so a new capability is one entry in',
+      '`ROLE_PERMISSIONS` (utils/constants.js) rather than a new role.',
+      '',
+      '## Typical setup',
+      '',
+      '1. Super admin logs in (`POST /api/auth/login`).',
+      '2. Creates the project with its gates (`POST /api/projects`) → returns the Intozi `api_key` **once**.',
+      '3. Customer signs up (`POST /api/auth/signup`) — an account with no data access yet.',
+      '4. Super admin assigns them the project (`PUT /api/users/{id}/projects`) — access is live immediately.',
+      '5. Customer registers vehicles (`POST /api/vehicles`).',
+      '6. Intozi posts events (`POST /api/anpr`) and polls the feed (`GET /api/anpr/feed`).',
+    ].join('\n'),
   },
   servers: [{ url: '/', description: 'Current host' }],
   tags: [
-    { name: 'ANPR', description: 'Event ingestion' },
-    { name: 'Vehicles', description: 'Registered-vehicle registry (internal dashboard)' },
+    { name: 'Auth', description: 'Signup, login and the caller’s own account' },
+    { name: 'Projects', description: 'Projects (group_id) and their gates (device_name)' },
+    { name: 'Users', description: 'Dashboard user administration — super admin only' },
+    { name: 'Vehicles', description: 'Registered-vehicle registry, scoped per project' },
+    { name: 'ANPR', description: 'Event ingestion and the Intozi polling feed' },
     { name: 'System', description: 'Health probes' },
   ],
   components: {
     securitySchemes: {
+      // Dashboard users.
+      BearerAuth: {
+        type: 'http',
+        scheme: 'bearer',
+        bearerFormat: 'JWT',
+        description:
+          'Dashboard access token from `POST /api/auth/login`. Sent as `Authorization: Bearer <token>`.',
+      },
+      // Cameras / Intozi.
       ApiKeyAuth: {
         type: 'apiKey',
         in: 'header',
         name: 'Authorization',
-        description: 'Shared secret, sent raw (`Authorization: <API_KEY>`) or as `Bearer <API_KEY>`.',
+        description:
+          'Per-project key issued by `POST /api/projects` (`Bearer pk_…`), which scopes the request ' +
+          'to that project, or the legacy shared `API_KEY`, which is unscoped. Both are also ' +
+          'accepted raw or via the `x-api-key` header.',
       },
     },
     schemas: {
+      ...authSchemas({ ROLE_VALUES, PERMISSIONS, LIST_MAX_LIMIT }),
       AnprEvent: {
         type: 'object',
         required: [
@@ -113,7 +168,24 @@ const swaggerSpec = {
             type: 'object',
             properties: {
               id: { type: 'string', example: '6789ab01c2d3e4f567890123' },
+              group_id: {
+                type: 'string',
+                nullable: true,
+                description:
+                  'The project the event was filed under — taken from the API key, not the body. ' +
+                  'null only for the legacy unscoped API_KEY.',
+                example: 'ACME_MALL',
+              },
               transaction_id: { type: 'integer', example: 108 },
+              vehicle_number: { type: 'string', nullable: true, example: 'MH12AB1234' },
+              vehicle_type: {
+                type: 'string',
+                enum: VEHICLE_TYPES,
+                description:
+                  'Resolved against this project’s registry at detection time — not taken from ' +
+                  'the camera when the plate is known.',
+                example: 'registered',
+              },
               event_image_path: { type: 'string', example: 'uploads/event-images/event_108_20251222T123301844Z_9f3c1a20.jpg' },
               plate_image_path: { type: 'string', example: 'uploads/plate-images/plate_108_20251222T123301851Z_1b7de904.jpg' },
             },
@@ -124,17 +196,26 @@ const swaggerSpec = {
       VehicleFeedRecord: {
         type: 'object',
         description:
-          'One event on the Intozi feed. Only vehicle_number and vehicle_type carry data — ' +
-          'every other field is returned as null by contract, even when the database holds a value.',
+          'One registered vehicle on the Intozi feed. Exactly three fields are disclosed; the ' +
+          'owner name, phone number and gate list on the underlying record stay internal.',
         properties: {
-          owner_name: { type: 'string', nullable: true, example: null },
-          created_datetime: { type: 'string', nullable: true, example: null },
-          contact_no: { type: 'string', nullable: true, example: null },
-          email: { type: 'string', nullable: true, example: null },
-          driver_name: { type: 'string', nullable: true, example: null },
-          vehicle_model: { type: 'string', nullable: true, example: null },
-          vehicle_type: { type: 'string', enum: VEHICLE_TYPES, example: 'registered' },
           vehicle_number: { type: 'string', nullable: true, example: 'UP32AB1234' },
+          group_id: {
+            type: 'string',
+            nullable: true,
+            description:
+              'The project this vehicle is registered under. Per-row, because the legacy global ' +
+              'key reads across every project; with a per-project key it is the same on every row.',
+            example: 'ACME_MALL_PARKING',
+          },
+          vehicle_type: {
+            type: 'string',
+            enum: VEHICLE_TYPES,
+            description:
+              'Derived from `valid_till` at read time — `unregistered` once the registration ' +
+              'has expired. Never stored, so it cannot go stale.',
+            example: 'registered',
+          },
         },
       },
       VehicleFeedResponse: {
@@ -162,11 +243,20 @@ const swaggerSpec = {
         type: 'object',
         required: ['vehicle_number', 'name', 'phone_number', 'valid_till'],
         properties: {
+          group_id: {
+            type: 'string',
+            description:
+              'The project to register the vehicle in. Optional for a user assigned to exactly ' +
+              'one project — theirs is used. Required for anyone with access to several.',
+            example: 'ACME_MALL',
+          },
           vehicle_number: {
             type: 'string',
             minLength: 3,
             maxLength: 20,
-            description: 'Stored uppercase. Re-sending an existing plate renews it instead of creating a duplicate.',
+            description:
+              'Stored uppercase. Re-sending an existing plate in the same project renews it ' +
+              'instead of creating a duplicate; the same plate in another project is separate.',
             example: 'MH12AB1234',
           },
           name: { type: 'string', maxLength: 150, example: 'Ramesh Kumar' },
@@ -179,13 +269,24 @@ const swaggerSpec = {
               'reported to Intozi as "unregistered".',
             example: '2027-03-31',
           },
+          device_names: {
+            type: 'array',
+            items: { type: 'string' },
+            description:
+              'Restricts the registration to specific gates. Empty or omitted means every gate in ' +
+              'the project, which is the normal case. At a gate not on the list, the vehicle is ' +
+              'reported as unregistered.',
+            example: ['entry1', 'exit1'],
+          },
         },
       },
       RegisteredVehicle: {
         type: 'object',
         properties: {
           id: { type: 'string', example: '6a7378aa86d8e0aa080d4f95' },
+          group_id: { type: 'string', example: 'ACME_MALL' },
           vehicle_number: { type: 'string', example: 'MH12AB1234' },
+          device_names: { type: 'array', items: { type: 'string' }, example: [] },
           name: { type: 'string', example: 'Ramesh Kumar' },
           phone_number: { type: 'string', example: '+91 9876543210' },
           valid_till: { type: 'string', format: 'date-time', example: '2027-03-31T23:59:59.999Z' },
@@ -265,11 +366,21 @@ const swaggerSpec = {
         content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } },
       },
       Unauthorized: {
-        description: 'Missing or invalid API key',
+        description: 'Missing, invalid or expired credential — logging in again is the fix',
+        content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } },
+      },
+      Forbidden: {
+        description:
+          'Authenticated, but not allowed: the role lacks the permission, or the project is ' +
+          'outside the caller’s scope. Logging in again will not help.',
+        content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } },
+      },
+      NotFound: {
+        description: 'No such resource',
         content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } },
       },
       Conflict: {
-        description: 'transaction_id already ingested',
+        description: 'Duplicate resource (transaction_id, group_id, email or device name)',
         content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } },
       },
       TooManyRequests: {
@@ -283,10 +394,27 @@ const swaggerSpec = {
     },
   },
   paths: {
-    '/api/anpr': {
+    // Dashboard: JWT-authenticated, scoped to the caller's projects.
+    ...authPaths,
+    ...projectPaths,
+    ...userPaths,
+
+    // Cameras / Intozi: API-key authenticated, scoped to the key's project.
+    '/api': {
       post: {
         tags: ['ANPR'],
         summary: 'Ingest an ANPR detection event',
+        description:
+          'The event is stored against the project the API key belongs to. A `group_id` in the ' +
+          'body **cannot override that** — a key issued for one site can never write into another ' +
+          'customer’s data. It is still read when the legacy unscoped `API_KEY` is used.\n\n' +
+          '`vehicle_type` is decided here, not taken from the camera: the plate is looked up in ' +
+          'that project’s registry and judged against `valid_till` at detection time.\n\n' +
+          '`transaction_id` is idempotent **within a project**, so two customers may legitimately ' +
+          'both send 4471.\n\n' +
+          'A `device_name` the project has never seen is auto-registered and flagged rather than ' +
+          'rejected — dropping a live event is a worse failure than an unexpected row in the ' +
+          'device table.',
         security: [{ ApiKeyAuth: [] }],
         requestBody: {
           required: true,
@@ -299,24 +427,43 @@ const swaggerSpec = {
           },
           400: { $ref: '#/components/responses/BadRequest' },
           401: { $ref: '#/components/responses/Unauthorized' },
+          403: { $ref: '#/components/responses/Forbidden' },
           409: { $ref: '#/components/responses/Conflict' },
           429: { $ref: '#/components/responses/TooManyRequests' },
           500: { $ref: '#/components/responses/ServerError' },
         },
       },
     },
-    '/api/anpr/feed': {
+    '/api/feed': {
       get: {
         tags: ['ANPR'],
-        summary: 'Vehicle feed polled by the Intozi server',
+        summary: 'Registered-vehicle feed polled by the Intozi server',
         description:
-          'Designed to be polled every 5-10 seconds. Returns the vehicle number and its ' +
-          'registered/unregistered status; all other fields are null by contract.\n\n' +
+          'Designed to be polled every 5-10 seconds. Reads the **registered-vehicle registry** — ' +
+          'not the detection log — so every vehicle the dashboard knows about appears here ' +
+          'whether or not a camera has ever seen it.\n\n' +
+          'Each row is exactly `vehicle_number`, `group_id` and `vehicle_type`. ' +
+          '`vehicle_type` is derived from `valid_till` at read time, so a registration that ' +
+          'lapsed a minute ago already reads `unregistered`.\n\n' +
           '**Polling loop:** call once without parameters (returns the newest page), then send the ' +
-          '`next_cursor` from every response back as `cursor`. Each event is delivered exactly once. ' +
-          'While `has_more` is true, poll again immediately rather than waiting for the next interval.',
+          '`next_cursor` from every response back as `cursor`. Each row is delivered exactly once; ' +
+          'renewing a registration re-sends it with its new status, which is how a poller learns ' +
+          'the status changed. While `has_more` is true, poll again immediately rather than ' +
+          'waiting for the next interval.\n\n' +
+          '**Scope:** a per-project key returns that project’s registrations only, with no ' +
+          'parameter needed and none accepted that would widen it — naming a different `group_id` ' +
+          'is a 403, not a wider read. Only the legacy shared `API_KEY` sees every project.',
         security: [{ ApiKeyAuth: [] }],
         parameters: [
+          {
+            name: 'group_id',
+            in: 'query',
+            required: false,
+            schema: { type: 'string', example: 'ACME_MALL' },
+            description:
+              'Narrows within what the key already grants. Pointless for a per-project key, and ' +
+              'rejected with 403 if it names anything else.',
+          },
           {
             name: 'cursor',
             in: 'query',
@@ -362,6 +509,7 @@ const swaggerSpec = {
           },
           400: { $ref: '#/components/responses/BadRequest' },
           401: { $ref: '#/components/responses/Unauthorized' },
+          403: { $ref: '#/components/responses/Forbidden' },
           429: { $ref: '#/components/responses/TooManyRequests' },
           500: { $ref: '#/components/responses/ServerError' },
         },
@@ -370,13 +518,17 @@ const swaggerSpec = {
     '/api/vehicles': {
       post: {
         tags: ['Vehicles'],
-        summary: 'Register a vehicle from the internal dashboard (or renew it)',
+        summary: 'Register a vehicle in a project (or renew it)',
         description:
           'Adds a vehicle to the registry that decides what `GET /api/anpr/feed` reports.\n\n' +
-          'A plate is unique: submitting one that is already registered updates the holder and ' +
-          'extends `valid_till` (200, `created: false`) instead of failing — that is how an expired ' +
-          'vehicle is renewed. A brand-new plate returns 201.',
-        security: [{ ApiKeyAuth: [] }],
+          'A plate is unique **within a project**: submitting one already registered there updates ' +
+          'the holder and extends `valid_till` (200, `created: false`) instead of failing — that is ' +
+          'how an expired vehicle is renewed. A brand-new plate returns 201. The same plate ' +
+          'registered under a different `group_id` is an entirely separate record.\n\n' +
+          '`group_id` may be omitted by a user assigned to exactly one project; anyone with access ' +
+          'to several must name one, because guessing on their behalf is how data lands in the ' +
+          'wrong tenant.',
+        security: [{ BearerAuth: [] }],
         requestBody: {
           required: true,
           content: { 'application/json': { schema: { $ref: '#/components/schemas/RegisterVehicle' } } },
@@ -396,6 +548,7 @@ const swaggerSpec = {
           },
           400: { $ref: '#/components/responses/BadRequest' },
           401: { $ref: '#/components/responses/Unauthorized' },
+          403: { $ref: '#/components/responses/Forbidden' },
           429: { $ref: '#/components/responses/TooManyRequests' },
           500: { $ref: '#/components/responses/ServerError' },
         },
@@ -405,9 +558,20 @@ const swaggerSpec = {
         summary: 'List registered vehicles for the dashboard table',
         description:
           'Offset paging with a total row count, plus search and status filtering. ' +
-          '`status` is evaluated against `valid_till` at request time, so expiry needs no cron job.',
-        security: [{ ApiKeyAuth: [] }],
+          '`status` is evaluated against `valid_till` at request time, so expiry needs no cron job.\n\n' +
+          'Restricted to the caller’s projects: a super admin sees every project, a customer admin ' +
+          'only their assigned ones, and an unassigned account sees an empty list.',
+        security: [{ BearerAuth: [] }],
         parameters: [
+          {
+            name: 'group_id',
+            in: 'query',
+            required: false,
+            schema: { type: 'string', example: 'ACME_MALL' },
+            description:
+              'Narrow to one project. Omit to see every project the caller can access. Naming a ' +
+              'project outside their scope is a 403.',
+          },
           {
             name: 'search',
             in: 'query',
@@ -449,6 +613,7 @@ const swaggerSpec = {
           },
           400: { $ref: '#/components/responses/BadRequest' },
           401: { $ref: '#/components/responses/Unauthorized' },
+          403: { $ref: '#/components/responses/Forbidden' },
           429: { $ref: '#/components/responses/TooManyRequests' },
           500: { $ref: '#/components/responses/ServerError' },
         },

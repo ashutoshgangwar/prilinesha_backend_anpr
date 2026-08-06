@@ -1,14 +1,65 @@
 {
   "info": {
     "name": "Prilinesha ANPR API",
-    "description": "ANPR event ingestion API. Set the `base_url` and `api_key` collection variables before running.",
+    "description": "Run the requests **in order** — each one saves what the next needs.\n\n1-3  log in as the super admin, sign a customer up, inspect the session\n4-7  create the project (returns the Intozi API key once) and its gates\n8-10 grant the customer access to the project\nthen the vehicle registry, the camera ingest and the Intozi feed\nfinally the isolation checks, which must all fail with 401/403\n\nSet super_admin_email / super_admin_password first; everything else is captured automatically.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
-    { "key": "base_url", "value": "http://localhost:5050" },
-    { "key": "api_key", "value": "replace-with-your-api-key" },
-    { "key": "transaction_id", "value": "108" },
-    { "key": "feed_cursor", "value": "" }
+    {
+      "key": "base_url",
+      "value": "http://localhost:5050",
+      "type": "string"
+    },
+    {
+      "key": "super_admin_email",
+      "value": "admin@prilinesha.com",
+      "type": "string"
+    },
+    {
+      "key": "super_admin_password",
+      "value": "ChangeMe123",
+      "type": "string"
+    },
+    {
+      "key": "super_admin_token",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "token",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "user_id",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "group_id",
+      "value": "ACME_MALL",
+      "type": "string"
+    },
+    {
+      "key": "project_key",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "api_key",
+      "value": "replace-with-your-api-key",
+      "type": "string"
+    },
+    {
+      "key": "transaction_id",
+      "value": "108",
+      "type": "string"
+    },
+    {
+      "key": "feed_cursor",
+      "value": "",
+      "type": "string"
+    }
   ],
   "item": [
     {
@@ -16,7 +67,15 @@
       "request": {
         "method": "GET",
         "header": [],
-        "url": { "raw": "{{base_url}}/health", "host": ["{{base_url}}"], "path": ["health"] }
+        "url": {
+          "raw": "{{base_url}}/health",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "health"
+          ]
+        }
       },
       "event": [
         {
@@ -36,22 +95,44 @@
       "request": {
         "method": "GET",
         "header": [],
-        "url": { "raw": "{{base_url}}/health/ready", "host": ["{{base_url}}"], "path": ["health", "ready"] }
+        "url": {
+          "raw": "{{base_url}}/health/ready",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "health",
+            "ready"
+          ]
+        }
       }
     },
     {
-      "name": "ANPR - create event (200)",
+      "name": "1. Auth - super admin login",
       "request": {
         "method": "POST",
         "header": [
-          { "key": "Content-Type", "value": "application/json" },
-          { "key": "Authorization", "value": "{{api_key}}" }
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
         ],
+        "description": "Log in as the super admin seeded from SUPER_ADMIN_EMAIL / SUPER_ADMIN_PASSWORD. Saves the token to {{super_admin_token}}.",
+        "url": {
+          "raw": "{{base_url}}/api/auth/login",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "auth",
+            "login"
+          ]
+        },
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"application_name\": \"ANPR\",\n  \"application_id\": 1,\n  \"device_name\": \"Intozi Camera 1\",\n  \"device_unique_key\": \"de21ba00-c4e2-474c-9106-b3bcc50e735f\",\n  \"group_id\": \"Gate-A\",\n  \"latitude\": \"12\",\n  \"longitude\": \"14\",\n  \"cam_id\": 3,\n  \"transaction_id\": {{transaction_id}},\n  \"color\": \"White\",\n  \"event_image\": \"/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==\",\n  \"vehicle_number\": \"UP32AB1234\",\n  \"vehicle_type\": \"registered\",\n  \"vehicle_model\": \"Swift VXI\",\n  \"owner_name\": \"Ramesh Kumar\",\n  \"contact_no\": \"+91 9876543210\",\n  \"email\": \"owner@example.com\",\n  \"driver_name\": \"Suresh Yadav\",\n  \"triple_riding\": false,\n  \"vehicle_class\": \"car\",\n  \"no_helmet\": false,\n  \"plate_image\": \"/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==\",\n  \"no_seatbelt\": false,\n  \"driver_on_call_status\": false,\n  \"created_datetime\": \"2025-12-22T12:33:01.744613\"\n}"
-        },
-        "url": { "raw": "{{base_url}}/api/anpr", "host": ["{{base_url}}"], "path": ["api", "anpr"] }
+          "raw": "{\n  \"email\": \"{{super_admin_email}}\",\n  \"password\": \"{{super_admin_password}}\"\n}"
+        }
       },
       "event": [
         {
@@ -59,10 +140,389 @@
           "script": {
             "type": "text/javascript",
             "exec": [
-              "pm.test('status is 200', () => pm.response.to.have.status(200));",
-              "pm.test('event stored', () => pm.expect(pm.response.json().success).to.be.true);",
-              "// Bump the transaction id so the next run is not a duplicate.",
-              "pm.collectionVariables.set('transaction_id', Number(pm.collectionVariables.get('transaction_id')) + 1);"
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "const d = pm.response.json().data;",
+              "pm.test('role is super_admin', () => pm.expect(d.user.role).to.eql('super_admin'));",
+              "pm.test('scoped to every project', () => pm.expect(d.user.group_ids).to.eql('ALL'));",
+              "pm.collectionVariables.set('super_admin_token', d.token);"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Auth - customer signs up",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "description": "Creates a customer admin with NO project access. The role is forced to \"admin\" — a role in the body is ignored. Saves {{user_id}} and {{token}}.",
+        "url": {
+          "raw": "{{base_url}}/api/auth/signup",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "auth",
+            "signup"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"Ravi Sharma\",\n  \"email\": \"ravi@acmemall.com\",\n  \"password\": \"AcmePass123\",\n  \"phone_number\": \"+91 9876543210\"\n}"
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('201 created', () => pm.response.to.have.status(201));",
+              "const d = pm.response.json().data;",
+              "pm.test('forced to admin role', () => pm.expect(d.user.role).to.eql('admin'));",
+              "pm.test('no project access yet', () => pm.expect(d.user.group_ids).to.eql([]));",
+              "pm.collectionVariables.set('user_id', d.user.id);",
+              "pm.collectionVariables.set('token', d.token);"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Auth - who am I",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          }
+        ],
+        "description": "Identity, role, permissions and assigned projects — read fresh from the database, so a revoked project shows up immediately.",
+        "url": {
+          "raw": "{{base_url}}/api/auth/me",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "auth",
+            "me"
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "pm.test('permissions are listed', () => pm.expect(pm.response.json().data.permissions).to.be.an('array'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Projects - create (super admin)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{super_admin_token}}"
+          }
+        ],
+        "description": "Creates the tenant and issues the Intozi API key. The key is returned ONCE — only its SHA-256 is stored. Saves it to {{project_key}}.",
+        "url": {
+          "raw": "{{base_url}}/api/projects",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "projects"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"group_id\": \"{{group_id}}\",\n  \"project_name\": \"Acme Mall Parking\",\n  \"customer_name\": \"Acme Retail Pvt Ltd\",\n  \"contact_email\": \"ops@acmemall.com\",\n  \"devices\": [\n    {\n      \"device_name\": \"entry1\",\n      \"direction\": \"entry\"\n    },\n    {\n      \"device_name\": \"exit1\",\n      \"direction\": \"exit\"\n    },\n    {\n      \"device_name\": \"exit2\",\n      \"direction\": \"exit\"\n    }\n  ]\n}"
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('201 created', () => pm.response.to.have.status(201));",
+              "const d = pm.response.json().data;",
+              "pm.test('api_key returned once', () => pm.expect(d.api_key).to.be.a('string'));",
+              "pm.test('gates attached', () => pm.expect(d.project.devices).to.have.lengthOf(3));",
+              "pm.collectionVariables.set('project_key', d.api_key);"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "5. Projects - list",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{super_admin_token}}"
+          }
+        ],
+        "description": "A super admin sees every project; a customer admin sees only their assigned ones.",
+        "url": {
+          "raw": "{{base_url}}/api/projects?page=1&limit=25",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "projects"
+          ],
+          "query": [
+            {
+              "key": "page",
+              "value": "1"
+            },
+            {
+              "key": "limit",
+              "value": "25"
+            }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "6. Projects - one project with stats",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{super_admin_token}}"
+          }
+        ],
+        "description": "Gates plus live counts (registered vehicles, total events, assigned users).",
+        "url": {
+          "raw": "{{base_url}}/api/projects/{{group_id}}",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "projects",
+            "{{group_id}}"
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "7. Projects - add a gate",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{super_admin_token}}"
+          }
+        ],
+        "description": "Device names are unique within a project, case-insensitively.",
+        "url": {
+          "raw": "{{base_url}}/api/projects/{{group_id}}/devices",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "projects",
+            "{{group_id}}",
+            "devices"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"device_name\": \"exit3\",\n  \"label\": \"Basement exit\",\n  \"direction\": \"exit\"\n}"
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('201 created', () => pm.response.to.have.status(201));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "8. Users - assign the project (THE ACCESS GRANT)",
+      "request": {
+        "method": "PUT",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{super_admin_token}}"
+          }
+        ],
+        "description": "The moment the signed-up customer can see anything. mode is replace (default), add or remove. Takes effect on their VERY NEXT request — no re-login.",
+        "url": {
+          "raw": "{{base_url}}/api/users/{{user_id}}/projects",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "users",
+            "{{user_id}}",
+            "projects"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"group_ids\": [\n    \"{{group_id}}\"\n  ],\n  \"mode\": \"replace\"\n}"
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "pm.test('project now assigned', () => pm.expect(pm.response.json().data.group_ids).to.include(pm.collectionVariables.get('group_id')));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "9. Users - list",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{super_admin_token}}"
+          }
+        ],
+        "description": "Filtering by group_id answers \"who has access to this project?\".",
+        "url": {
+          "raw": "{{base_url}}/api/users?group_id={{group_id}}",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "users"
+          ],
+          "query": [
+            {
+              "key": "group_id",
+              "value": "{{group_id}}"
+            }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "10. Users - unknown group_id rejected (400)",
+      "request": {
+        "method": "PUT",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{super_admin_token}}"
+          }
+        ],
+        "description": "A typo would silently grant access to nothing and look like a bug, so it fails loudly instead.",
+        "url": {
+          "raw": "{{base_url}}/api/users/{{user_id}}/projects",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "users",
+            "{{user_id}}",
+            "projects"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"group_ids\": [\n    \"NO_SUCH_PROJECT\"\n  ]\n}"
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('400 Bad Request', () => pm.response.to.have.status(400));"
             ]
           }
         }
@@ -73,15 +533,30 @@
       "request": {
         "method": "POST",
         "header": [
-          { "key": "Content-Type", "value": "application/json" },
-          { "key": "Authorization", "value": "{{api_key}}" }
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          }
         ],
-        "description": "Internal dashboard: add a vehicle. Re-sending the same plate renews it (200) instead of duplicating.",
+        "description": "Internal dashboard: add a vehicle. Re-sending the same plate renews it (200) instead of duplicating. Authenticated with a dashboard token; scoped to the caller’s projects.",
         "body": {
           "mode": "raw",
           "raw": "{\n  \"vehicle_number\": \"MH12AB1234\",\n  \"name\": \"Ramesh Kumar\",\n  \"phone_number\": \"+91 9876543210\",\n  \"valid_till\": \"2027-03-31\"\n}"
         },
-        "url": { "raw": "{{base_url}}/api/vehicles", "host": ["{{base_url}}"], "path": ["api", "vehicles"] }
+        "url": {
+          "raw": "{{base_url}}/api/vehicles",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "vehicles"
+          ]
+        }
       },
       "event": [
         {
@@ -102,17 +577,44 @@
       "name": "Dashboard - list vehicles (200)",
       "request": {
         "method": "GET",
-        "header": [{ "key": "Authorization", "value": "{{api_key}}" }],
-        "description": "Registry table for the dashboard: search, status filter, page numbers.",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          }
+        ],
+        "description": "Registry table for the dashboard: search, status filter, page numbers. Authenticated with a dashboard token; scoped to the caller’s projects.",
         "url": {
           "raw": "{{base_url}}/api/vehicles?page=1&limit=25",
-          "host": ["{{base_url}}"],
-          "path": ["api", "vehicles"],
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "vehicles"
+          ],
           "query": [
-            { "key": "page", "value": "1" },
-            { "key": "limit", "value": "25", "description": "1-200, default 25" },
-            { "key": "search", "value": "MH12", "description": "plate, name or phone (partial)", "disabled": true },
-            { "key": "status", "value": "unregistered", "description": "registered | unregistered", "disabled": true }
+            {
+              "key": "page",
+              "value": "1"
+            },
+            {
+              "key": "limit",
+              "value": "25",
+              "description": "1-200, default 25"
+            },
+            {
+              "key": "search",
+              "value": "MH12",
+              "description": "plate, name or phone (partial)",
+              "disabled": true
+            },
+            {
+              "key": "status",
+              "value": "unregistered",
+              "description": "registered | unregistered",
+              "disabled": true
+            }
           ]
         }
       },
@@ -138,15 +640,30 @@
       "request": {
         "method": "POST",
         "header": [
-          { "key": "Content-Type", "value": "application/json" },
-          { "key": "Authorization", "value": "{{api_key}}" }
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          }
         ],
-        "description": "A past valid_till registers the vehicle but reports it as unregistered — no cron job expires anything.",
+        "description": "A past valid_till registers the vehicle but reports it as unregistered — no cron job expires anything. Authenticated with a dashboard token; scoped to the caller’s projects.",
         "body": {
           "mode": "raw",
           "raw": "{\n  \"vehicle_number\": \"DL01XY9999\",\n  \"name\": \"Anita Sharma\",\n  \"phone_number\": \"9812345678\",\n  \"valid_till\": \"2020-01-31\"\n}"
         },
-        "url": { "raw": "{{base_url}}/api/vehicles", "host": ["{{base_url}}"], "path": ["api", "vehicles"] }
+        "url": {
+          "raw": "{{base_url}}/api/vehicles",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "vehicles"
+          ]
+        }
       },
       "event": [
         {
@@ -166,21 +683,126 @@
       "request": {
         "method": "POST",
         "header": [
-          { "key": "Content-Type", "value": "application/json" },
-          { "key": "Authorization", "value": "{{api_key}}" }
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          }
         ],
         "body": {
           "mode": "raw",
           "raw": "{\n  \"vehicle_number\": \"AB\",\n  \"name\": \"\",\n  \"phone_number\": \"12\",\n  \"valid_till\": \"31-12-2026\"\n}"
         },
-        "url": { "raw": "{{base_url}}/api/vehicles", "host": ["{{base_url}}"], "path": ["api", "vehicles"] }
+        "url": {
+          "raw": "{{base_url}}/api/vehicles",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "vehicles"
+          ]
+        },
+        "description": " Authenticated with a dashboard token; scoped to the caller’s projects."
       },
       "event": [
         {
           "listen": "test",
           "script": {
             "type": "text/javascript",
-            "exec": ["pm.test('status is 400', () => pm.response.to.have.status(400));"]
+            "exec": [
+              "pm.test('status is 400', () => pm.response.to.have.status(400));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "ANPR - create event (200)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{project_key}}"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"application_name\": \"ANPR\",\n  \"application_id\": 1,\n  \"device_name\": \"entry1\",\n  \"device_unique_key\": \"de21ba00-c4e2-474c-9106-b3bcc50e735f\",\n  \"group_id\": \"{{group_id}}\",\n  \"latitude\": \"12\",\n  \"longitude\": \"14\",\n  \"cam_id\": 3,\n  \"transaction_id\": {{transaction_id}},\n  \"color\": \"White\",\n  \"event_image\": \"/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==\",\n  \"vehicle_number\": \"UP32AB1234\",\n  \"vehicle_type\": \"registered\",\n  \"vehicle_model\": \"Swift VXI\",\n  \"owner_name\": \"Ramesh Kumar\",\n  \"contact_no\": \"+91 9876543210\",\n  \"email\": \"owner@example.com\",\n  \"driver_name\": \"Suresh Yadav\",\n  \"triple_riding\": false,\n  \"vehicle_class\": \"car\",\n  \"no_helmet\": false,\n  \"plate_image\": \"/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==\",\n  \"no_seatbelt\": false,\n  \"driver_on_call_status\": false,\n  \"created_datetime\": \"2025-12-22T12:33:01.744613\"\n}"
+        },
+        "url": {
+          "raw": "{{base_url}}/api/anpr",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "anpr"
+          ]
+        },
+        "description": "Filed under the project the API key belongs to — a group_id in the body cannot override that."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 200', () => pm.response.to.have.status(200));",
+              "pm.test('event stored', () => pm.expect(pm.response.json().success).to.be.true);",
+              "// Bump the transaction id so the next run is not a duplicate.",
+              "pm.collectionVariables.set('transaction_id', Number(pm.collectionVariables.get('transaction_id')) + 1);"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "ANPR - duplicate transaction_id (409)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{project_key}}"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"application_name\": \"ANPR\",\n  \"application_id\": 1,\n  \"device_name\": \"entry1\",\n  \"device_unique_key\": \"de21ba00-c4e2-474c-9106-b3bcc50e735f\",\n  \"cam_id\": 3,\n  \"transaction_id\": 108,\n  \"event_image\": \"/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==\",\n  \"plate_image\": \"/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==\",\n  \"created_datetime\": \"2025-12-22T12:33:01.744613\"\n}"
+        },
+        "url": {
+          "raw": "{{base_url}}/api/anpr",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "anpr"
+          ]
+        },
+        "description": "transaction_id is idempotent WITHIN a project — another project may reuse the same number."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 409', () => pm.response.to.have.status(409));"
+            ]
           }
         }
       ]
@@ -189,17 +811,46 @@
       "name": "ANPR - Intozi feed (200)",
       "request": {
         "method": "GET",
-        "header": [{ "key": "Authorization", "value": "{{api_key}}" }],
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{project_key}}"
+          }
+        ],
         "description": "Polling feed for the Intozi server. First call: no cursor (returns the newest page). Every later call sends back the stored feed_cursor, so only new events arrive.",
         "url": {
           "raw": "{{base_url}}/api/anpr/feed?cursor={{feed_cursor}}&limit=100",
-          "host": ["{{base_url}}"],
-          "path": ["api", "anpr", "feed"],
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "anpr",
+            "feed"
+          ],
           "query": [
-            { "key": "cursor", "value": "{{feed_cursor}}", "description": "next_cursor from the previous response; leave empty on the first call" },
-            { "key": "limit", "value": "100", "description": "1-1000, default 100" },
-            { "key": "vehicle_type", "value": "registered", "description": "optional filter", "disabled": true },
-            { "key": "since", "value": "2025-12-22T12:33:01.744Z", "description": "optional cold start instead of cursor", "disabled": true }
+            {
+              "key": "cursor",
+              "value": "{{feed_cursor}}",
+              "description": "next_cursor from the previous response; leave empty on the first call"
+            },
+            {
+              "key": "limit",
+              "value": "100",
+              "description": "1-1000, default 100"
+            },
+            {
+              "key": "vehicle_type",
+              "value": "registered",
+              "description": "optional filter",
+              "disabled": true
+            },
+            {
+              "key": "since",
+              "value": "2025-12-22T12:33:01.744Z",
+              "description": "optional cold start instead of cursor",
+              "disabled": true
+            }
           ]
         }
       },
@@ -233,12 +884,28 @@
       "name": "ANPR - Intozi feed, bad cursor (400)",
       "request": {
         "method": "GET",
-        "header": [{ "key": "Authorization", "value": "{{api_key}}" }],
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{project_key}}"
+          }
+        ],
         "url": {
           "raw": "{{base_url}}/api/anpr/feed?cursor=not-a-real-cursor",
-          "host": ["{{base_url}}"],
-          "path": ["api", "anpr", "feed"],
-          "query": [{ "key": "cursor", "value": "not-a-real-cursor" }]
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "anpr",
+            "feed"
+          ],
+          "query": [
+            {
+              "key": "cursor",
+              "value": "not-a-real-cursor"
+            }
+          ]
         }
       },
       "event": [
@@ -246,49 +913,9 @@
           "listen": "test",
           "script": {
             "type": "text/javascript",
-            "exec": ["pm.test('status is 400', () => pm.response.to.have.status(400));"]
-          }
-        }
-      ]
-    },
-    {
-      "name": "ANPR - duplicate transaction_id (409)",
-      "request": {
-        "method": "POST",
-        "header": [
-          { "key": "Content-Type", "value": "application/json" },
-          { "key": "Authorization", "value": "{{api_key}}" }
-        ],
-        "body": {
-          "mode": "raw",
-          "raw": "{\n  \"application_name\": \"ANPR\",\n  \"application_id\": 1,\n  \"device_name\": \"Intozi Camera 1\",\n  \"device_unique_key\": \"de21ba00-c4e2-474c-9106-b3bcc50e735f\",\n  \"cam_id\": 3,\n  \"transaction_id\": 108,\n  \"event_image\": \"/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==\",\n  \"plate_image\": \"/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==\",\n  \"created_datetime\": \"2025-12-22T12:33:01.744613\"\n}"
-        },
-        "url": { "raw": "{{base_url}}/api/anpr", "host": ["{{base_url}}"], "path": ["api", "anpr"] }
-      },
-      "event": [
-        {
-          "listen": "test",
-          "script": {
-            "type": "text/javascript",
-            "exec": ["pm.test('status is 409', () => pm.response.to.have.status(409));"]
-          }
-        }
-      ]
-    },
-    {
-      "name": "ANPR - missing API key (401)",
-      "request": {
-        "method": "POST",
-        "header": [{ "key": "Content-Type", "value": "application/json" }],
-        "body": { "mode": "raw", "raw": "{}" },
-        "url": { "raw": "{{base_url}}/api/anpr", "host": ["{{base_url}}"], "path": ["api", "anpr"] }
-      },
-      "event": [
-        {
-          "listen": "test",
-          "script": {
-            "type": "text/javascript",
-            "exec": ["pm.test('status is 401', () => pm.response.to.have.status(401));"]
+            "exec": [
+              "pm.test('status is 400', () => pm.response.to.have.status(400));"
+            ]
           }
         }
       ]
@@ -298,14 +925,29 @@
       "request": {
         "method": "POST",
         "header": [
-          { "key": "Content-Type", "value": "application/json" },
-          { "key": "Authorization", "value": "{{api_key}}" }
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{project_key}}"
+          }
         ],
         "body": {
           "mode": "raw",
           "raw": "{\n  \"application_name\": \"ANPR\",\n  \"application_id\": \"not-a-number\",\n  \"device_name\": \"Intozi Camera 1\",\n  \"device_unique_key\": \"not-a-uuid\",\n  \"cam_id\": 3,\n  \"transaction_id\": 999,\n  \"vehicle_class\": \"spaceship\",\n  \"color\": \"Purple\",\n  \"event_image\": \"not-base64!!\",\n  \"plate_image\": \"not-base64!!\",\n  \"created_datetime\": \"22-12-2025\"\n}"
         },
-        "url": { "raw": "{{base_url}}/api/anpr", "host": ["{{base_url}}"], "path": ["api", "anpr"] }
+        "url": {
+          "raw": "{{base_url}}/api/anpr",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "anpr"
+          ]
+        }
       },
       "event": [
         {
@@ -321,18 +963,245 @@
       ]
     },
     {
-      "name": "Unknown route (404)",
+      "name": "ANPR - missing API key (401)",
       "request": {
-        "method": "GET",
-        "header": [],
-        "url": { "raw": "{{base_url}}/api/does-not-exist", "host": ["{{base_url}}"], "path": ["api", "does-not-exist"] }
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{}"
+        },
+        "url": {
+          "raw": "{{base_url}}/api/anpr",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "anpr"
+          ]
+        }
       },
       "event": [
         {
           "listen": "test",
           "script": {
             "type": "text/javascript",
-            "exec": ["pm.test('status is 404', () => pm.response.to.have.status(404));"]
+            "exec": [
+              "pm.test('status is 401', () => pm.response.to.have.status(401));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Unknown route (404)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/does-not-exist",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "does-not-exist"
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 404', () => pm.response.to.have.status(404));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Isolation - customer cannot reach another project (403)",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          }
+        ],
+        "description": "Naming a project outside your scope is a 403, on reads and writes alike.",
+        "url": {
+          "raw": "{{base_url}}/api/vehicles?group_id=SOME_OTHER_PROJECT",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "vehicles"
+          ],
+          "query": [
+            {
+              "key": "group_id",
+              "value": "SOME_OTHER_PROJECT"
+            }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('403 Forbidden', () => pm.response.to.have.status(403));",
+              "pm.test('code is FORBIDDEN', () => pm.expect(pm.response.json().code).to.eql('FORBIDDEN'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Isolation - customer cannot manage users (403)",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          }
+        ],
+        "description": "User administration requires a permission only super_admin holds.",
+        "url": {
+          "raw": "{{base_url}}/api/users",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "users"
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('403 Forbidden', () => pm.response.to.have.status(403));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Isolation - customer cannot create a project (403)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/projects",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "projects"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"group_id\": \"SELF_MADE\",\n  \"project_name\": \"Self Made\"\n}"
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('403 Forbidden', () => pm.response.to.have.status(403));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Isolation - no token (401)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "description": "Dashboard endpoints need a JWT; the camera API key does not work here.",
+        "url": {
+          "raw": "{{base_url}}/api/vehicles",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "vehicles"
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('401 Unauthorized', () => pm.response.to.have.status(401));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Isolation - forged project key (401)",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer pk_ACMEMALL_0000000000000000000000000000000000000000000000"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/anpr/feed",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "anpr",
+            "feed"
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('401 Unauthorized', () => pm.response.to.have.status(401));"
+            ]
           }
         }
       ]
