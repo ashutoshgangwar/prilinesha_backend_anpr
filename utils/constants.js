@@ -31,6 +31,10 @@ const FEED_MASKED_FIELDS = [
 const FEED_DEFAULT_LIMIT = 100;
 const FEED_MAX_LIMIT = 1000;
 
+/** Page sizes for the dashboard's registered-vehicle table. */
+const REGISTRY_DEFAULT_LIMIT = 25;
+const REGISTRY_MAX_LIMIT = 200;
+
 const IMAGE_KIND = {
   EVENT: 'event',
   PLATE: 'plate',
@@ -50,6 +54,8 @@ module.exports = {
   FEED_MASKED_FIELDS,
   FEED_DEFAULT_LIMIT,
   FEED_MAX_LIMIT,
+  REGISTRY_DEFAULT_LIMIT,
+  REGISTRY_MAX_LIMIT,
   IMAGE_KIND,
   IMAGE_DIRECTORIES,
 };

@@ -3,6 +3,7 @@ const AppError = require('../utils/AppError');
 const logger = require('../utils/logger');
 const { saveEventImages, removeFiles } = require('../utils/imageStorage');
 const { encodeCursor, decodeCursor } = require('../utils/feedCursor');
+const { resolveVehicleStatus } = require('./vehicleService');
 const {
   DEFAULT_VEHICLE_TYPE,
   FEED_MASKED_FIELDS,
@@ -22,7 +23,8 @@ const {
  * @param {object} payload Validated ANPR event.
  * @param {object} [context]
  * @param {string} [context.requestId] Correlation id for logging.
- * @returns {Promise<{ id: string, transaction_id: number, event_image_path: string, plate_image_path: string }>}
+ * @returns {Promise<{ id: string, transaction_id: number, vehicle_number: string|null,
+ *                     vehicle_type: string, event_image_path: string, plate_image_path: string }>}
  * @throws {AppError} 409 when transaction_id was already ingested.
  */
 const createAnprEvent = async (payload, { requestId } = {}) => {
@@ -44,7 +46,24 @@ const createAnprEvent = async (payload, { requestId } = {}) => {
     throw AppError.conflict(`An event with transaction_id ${payload.transaction_id} already exists.`);
   }
 
-  // 2. Persist whichever images were sent — both are optional.
+  // 2. Decide registered/unregistered from the dashboard registry.
+  //    Judged at detection time, not at read time, so the stored event is an
+  //    honest record of what the vehicle's status was when it was seen — a
+  //    registration expiring tomorrow cannot rewrite today's detections.
+  //    An unknown plate falls back to whatever the camera claimed.
+  const registryStatus = await resolveVehicleStatus(
+    payload.vehicle_number ?? null,
+    payload.created_datetime
+  );
+
+  const vehicleType = registryStatus ?? payload.vehicle_type ?? DEFAULT_VEHICLE_TYPE;
+
+  log.info('Registration status resolved', {
+    vehicle_type: vehicleType,
+    source: registryStatus ? 'registry' : 'payload-or-default',
+  });
+
+  // 3. Persist whichever images were sent — both are optional.
   //    Rolls itself back on partial failure.
   const images = await saveEventImages({
     eventImage: payload.event_image,
@@ -62,7 +81,7 @@ const createAnprEvent = async (payload, { requestId } = {}) => {
     plate_image_bytes: images.plate ? images.plate.bytes : 0,
   });
 
-  // 3. Insert the record, discarding the images if the write fails.
+  // 4. Insert the record, discarding the images if the write fails.
   try {
     const record = await VehicleLog.create({
       application_name: payload.application_name,
@@ -77,7 +96,7 @@ const createAnprEvent = async (payload, { requestId } = {}) => {
       vehicle_number: payload.vehicle_number ?? null,
       vehicle_class: payload.vehicle_class ?? null,
       color: payload.color ?? null,
-      vehicle_type: payload.vehicle_type ?? DEFAULT_VEHICLE_TYPE,
+      vehicle_type: vehicleType,
       vehicle_model: payload.vehicle_model ?? null,
       owner_name: payload.owner_name ?? null,
       contact_no: payload.contact_no ?? null,
@@ -98,6 +117,8 @@ const createAnprEvent = async (payload, { requestId } = {}) => {
     return {
       id: String(record._id),
       transaction_id: record.transaction_id,
+      vehicle_number: record.vehicle_number,
+      vehicle_type: record.vehicle_type,
       event_image_path: record.event_image_path,
       plate_image_path: record.plate_image_path,
     };

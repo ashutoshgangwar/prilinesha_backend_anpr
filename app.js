@@ -8,6 +8,7 @@ const config = require('./config/env');
 const swaggerSpec = require('./docs/swagger');
 
 const anprRoutes = require('./routes/anpr');
+const vehicleRoutes = require('./routes/vehicles');
 const healthRoutes = require('./routes/health');
 
 const sanitize = require('./middleware/sanitize');
@@ -74,6 +75,7 @@ if (config.SWAGGER_ENABLED) {
 app.use('/health', healthRoutes);
 app.use('/api', apiLimiter);
 app.use('/api/anpr', anprRoutes);
+app.use('/api/vehicles', vehicleRoutes);
 
 app.get('/', (_req, res) => {
   res.json({

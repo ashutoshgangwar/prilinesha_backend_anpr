@@ -4,6 +4,8 @@ const {
   VEHICLE_TYPES,
   FEED_DEFAULT_LIMIT,
   FEED_MAX_LIMIT,
+  REGISTRY_DEFAULT_LIMIT,
+  REGISTRY_MAX_LIMIT,
 } = require('../utils/constants');
 
 /** OpenAPI 3.0 description of the public surface, served at /api-docs. */
@@ -19,6 +21,7 @@ const swaggerSpec = {
   servers: [{ url: '/', description: 'Current host' }],
   tags: [
     { name: 'ANPR', description: 'Event ingestion' },
+    { name: 'Vehicles', description: 'Registered-vehicle registry (internal dashboard)' },
     { name: 'System', description: 'Health probes' },
   ],
   components: {
@@ -155,6 +158,87 @@ const swaggerSpec = {
           requestId: { type: 'string', format: 'uuid' },
         },
       },
+      RegisterVehicle: {
+        type: 'object',
+        required: ['vehicle_number', 'name', 'phone_number', 'valid_till'],
+        properties: {
+          vehicle_number: {
+            type: 'string',
+            minLength: 3,
+            maxLength: 20,
+            description: 'Stored uppercase. Re-sending an existing plate renews it instead of creating a duplicate.',
+            example: 'MH12AB1234',
+          },
+          name: { type: 'string', maxLength: 150, example: 'Ramesh Kumar' },
+          phone_number: { type: 'string', example: '+91 9876543210' },
+          valid_till: {
+            type: 'string',
+            description:
+              'Date (YYYY-MM-DD) or ISO 8601 datetime. A plain date covers the whole day — it is ' +
+              'stored as 23:59:59.999 UTC. Once it passes, every later detection of this plate is ' +
+              'reported to Intozi as "unregistered".',
+            example: '2027-03-31',
+          },
+        },
+      },
+      RegisteredVehicle: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', example: '6a7378aa86d8e0aa080d4f95' },
+          vehicle_number: { type: 'string', example: 'MH12AB1234' },
+          name: { type: 'string', example: 'Ramesh Kumar' },
+          phone_number: { type: 'string', example: '+91 9876543210' },
+          valid_till: { type: 'string', format: 'date-time', example: '2027-03-31T23:59:59.999Z' },
+          status: {
+            type: 'string',
+            enum: VEHICLE_TYPES,
+            description: 'Derived from valid_till at read time — never stored, so it cannot go stale.',
+            example: 'registered',
+          },
+          days_remaining: {
+            type: 'integer',
+            description: 'Negative once expired (e.g. -185 means it lapsed 185 days ago).',
+            example: 239,
+          },
+          created_at: { type: 'string', format: 'date-time' },
+          updated_at: { type: 'string', format: 'date-time' },
+        },
+      },
+      RegisteredVehicleSaved: {
+        type: 'object',
+        properties: {
+          success: { type: 'boolean', example: true },
+          message: { type: 'string', example: 'Vehicle registered successfully.' },
+          created: {
+            type: 'boolean',
+            description: 'true when a new plate was added (201), false when an existing one was renewed (200).',
+            example: true,
+          },
+          data: { $ref: '#/components/schemas/RegisteredVehicle' },
+          requestId: { type: 'string', format: 'uuid' },
+        },
+      },
+      RegisteredVehicleList: {
+        type: 'object',
+        properties: {
+          success: { type: 'boolean', example: true },
+          message: { type: 'string', example: 'Vehicles fetched successfully.' },
+          count: { type: 'integer', example: 2 },
+          pagination: {
+            type: 'object',
+            properties: {
+              page: { type: 'integer', example: 1 },
+              limit: { type: 'integer', example: 25 },
+              total: { type: 'integer', example: 2 },
+              total_pages: { type: 'integer', example: 1 },
+              has_next: { type: 'boolean', example: false },
+              has_previous: { type: 'boolean', example: false },
+            },
+          },
+          data: { type: 'array', items: { $ref: '#/components/schemas/RegisteredVehicle' } },
+          requestId: { type: 'string', format: 'uuid' },
+        },
+      },
       ErrorResponse: {
         type: 'object',
         properties: {
@@ -274,6 +358,93 @@ const swaggerSpec = {
             description: 'Feed page (an empty `data` array simply means nothing new since the cursor)',
             content: {
               'application/json': { schema: { $ref: '#/components/schemas/VehicleFeedResponse' } },
+            },
+          },
+          400: { $ref: '#/components/responses/BadRequest' },
+          401: { $ref: '#/components/responses/Unauthorized' },
+          429: { $ref: '#/components/responses/TooManyRequests' },
+          500: { $ref: '#/components/responses/ServerError' },
+        },
+      },
+    },
+    '/api/vehicles': {
+      post: {
+        tags: ['Vehicles'],
+        summary: 'Register a vehicle from the internal dashboard (or renew it)',
+        description:
+          'Adds a vehicle to the registry that decides what `GET /api/anpr/feed` reports.\n\n' +
+          'A plate is unique: submitting one that is already registered updates the holder and ' +
+          'extends `valid_till` (200, `created: false`) instead of failing — that is how an expired ' +
+          'vehicle is renewed. A brand-new plate returns 201.',
+        security: [{ ApiKeyAuth: [] }],
+        requestBody: {
+          required: true,
+          content: { 'application/json': { schema: { $ref: '#/components/schemas/RegisterVehicle' } } },
+        },
+        responses: {
+          200: {
+            description: 'Existing registration renewed',
+            content: {
+              'application/json': { schema: { $ref: '#/components/schemas/RegisteredVehicleSaved' } },
+            },
+          },
+          201: {
+            description: 'Vehicle registered',
+            content: {
+              'application/json': { schema: { $ref: '#/components/schemas/RegisteredVehicleSaved' } },
+            },
+          },
+          400: { $ref: '#/components/responses/BadRequest' },
+          401: { $ref: '#/components/responses/Unauthorized' },
+          429: { $ref: '#/components/responses/TooManyRequests' },
+          500: { $ref: '#/components/responses/ServerError' },
+        },
+      },
+      get: {
+        tags: ['Vehicles'],
+        summary: 'List registered vehicles for the dashboard table',
+        description:
+          'Offset paging with a total row count, plus search and status filtering. ' +
+          '`status` is evaluated against `valid_till` at request time, so expiry needs no cron job.',
+        security: [{ ApiKeyAuth: [] }],
+        parameters: [
+          {
+            name: 'search',
+            in: 'query',
+            required: false,
+            schema: { type: 'string', maxLength: 100 },
+            description: 'Partial, case-insensitive match on vehicle number, name or phone number.',
+          },
+          {
+            name: 'status',
+            in: 'query',
+            required: false,
+            schema: { type: 'string', enum: VEHICLE_TYPES },
+            description: '`registered` = still inside valid_till; `unregistered` = expired.',
+          },
+          {
+            name: 'page',
+            in: 'query',
+            required: false,
+            schema: { type: 'integer', minimum: 1, default: 1 },
+          },
+          {
+            name: 'limit',
+            in: 'query',
+            required: false,
+            schema: {
+              type: 'integer',
+              minimum: 1,
+              maximum: REGISTRY_MAX_LIMIT,
+              default: REGISTRY_DEFAULT_LIMIT,
+            },
+          },
+        ],
+        responses: {
+          200: {
+            description: 'Registry page, newest registration first',
+            content: {
+              'application/json': { schema: { $ref: '#/components/schemas/RegisteredVehicleList' } },
             },
           },
           400: { $ref: '#/components/responses/BadRequest' },

@@ -6,6 +6,7 @@ const app = require('./app');
 const { connectDatabase, disconnectDatabase } = require('./config/database');
 const { ensureStorageDirectories } = require('./utils/imageStorage');
 const VehicleLog = require('./models/VehicleLog');
+const RegisteredVehicle = require('./models/RegisteredVehicle');
 
 let server;
 let shuttingDown = false;
@@ -20,10 +21,12 @@ const start = async () => {
     await ensureStorageDirectories();
     await connectDatabase();
 
-    // Guarantees the unique transaction_id index exists even when autoIndex is
-    // disabled in production.
-    await VehicleLog.syncIndexes();
-    logger.info('Indexes synchronised', { model: VehicleLog.modelName });
+    // Guarantees the unique transaction_id / vehicle_number indexes exist even
+    // when autoIndex is disabled in production.
+    await Promise.all([VehicleLog.syncIndexes(), RegisteredVehicle.syncIndexes()]);
+    logger.info('Indexes synchronised', {
+      models: [VehicleLog.modelName, RegisteredVehicle.modelName],
+    });
 
     server = app.listen(config.PORT, () => {
       logger.info('HTTP server listening', {

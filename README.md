@@ -16,6 +16,7 @@ metadata in MongoDB.
 | Images | Optional base64 decode, magic-byte check, size cap, unique filenames, rollback on failure |
 | Idempotency | Unique index on `transaction_id`; replays return `409` |
 | Intozi feed | `GET /api/anpr/feed`, polled every 5–10 s; keyset cursor delivers each event exactly once |
+| Vehicle registry | Dashboard adds a vehicle with a `valid_till`; expiry flips detections to `unregistered` with no cron job |
 | Errors | Centralized handler with a single response envelope (`400/401/404/409/413/429/500`) |
 | Logging | Winston, daily-rotated files + console, request ids, base64 payloads redacted |
 | Security | Helmet, CORS, per-IP rate limiting, 15 MB body cap, NoSQL-operator sanitizing |
@@ -84,6 +85,29 @@ MongoDB (retrying with exponential backoff) and synchronises the indexes.
 
 ---
 
+## How the three surfaces fit together
+
+```
+ Internal dashboard              This API                        Intozi server
+ ─────────────────────           ─────────────────────           ─────────────────────
+ POST /api/vehicles  ─────────►  RegisteredVehicle
+ (name, phone, plate,            (plate → valid_till)
+  valid_till)                            │
+                                         │ looked up at detection time
+ GET  /api/vehicles  ◄────────           ▼
+ (table + status)                VehicleLog.vehicle_type
+                                         │
+       Intozi camera ──────────►         │
+       POST /api/anpr                    ▼
+                                 GET /api/anpr/feed  ─────────►  polls every 5–10 s
+                                 (plate + registered?)
+```
+
+A plate is **registered** only while a dashboard registration covers it. The moment `valid_till`
+passes, the next detection is reported to Intozi as **unregistered** — nothing has to expire it.
+
+---
+
 ## API
 
 ### `POST /api/anpr`
@@ -147,13 +171,25 @@ Authorization: <API_KEY>          # "Bearer <API_KEY>" and "x-api-key" also acce
 | `vehicle_number` | no | 3–20 chars, `A-Z 0-9 -`, stored uppercase |
 | `vehicle_class` | no | `bus` \| `car` \| `bike` \| `truck` \| `auto` |
 | `color` | no | `White` \| `Gray` \| `Yellow` \| `Red` \| `Green` \| `Blue` \| `Black` |
-| `vehicle_type` | no | `registered` \| `unregistered`; **omitted → `unregistered`** |
+| `vehicle_type` | no | `registered` \| `unregistered`. **Ignored when the plate is on the registry** — see below. |
 | `vehicle_model` | no | string, ≤ 100 chars |
 | `owner_name` | no | string, ≤ 150 chars |
 | `driver_name` | no | string, ≤ 150 chars |
 | `contact_no` | no | 6–20 digits, optional `+` prefix, spaces/hyphens allowed |
 | `email` | no | valid email, ≤ 254 chars, stored lowercase |
 | `triple_riding`, `no_helmet`, `no_seatbelt`, `driver_on_call_status` | no | boolean, default `false` |
+
+**How `vehicle_type` is decided** — the camera does not get the last word:
+
+| Plate on the registry? | Result |
+| --- | --- |
+| Yes, `valid_till` not passed at `created_datetime` | `registered` |
+| Yes, but expired | `unregistered` — even if the payload says `"vehicle_type": "registered"` |
+| No | Falls back to the payload's `vehicle_type`, else `unregistered` |
+
+Status is judged at **detection time**, not at read time, so the stored event stays an honest record
+of what the vehicle was when it was seen — a registration expiring tomorrow cannot rewrite today's
+detections.
 
 **200 OK**
 
@@ -164,6 +200,8 @@ Authorization: <API_KEY>          # "Bearer <API_KEY>" and "x-api-key" also acce
   "data": {
     "id": "6789ab01c2d3e4f567890123",
     "transaction_id": 108,
+    "vehicle_number": "UP32AB1234",
+    "vehicle_type": "registered",
     "event_image_path": "uploads/event-images/event_108_20251222T123301844Z_9f3c1a20.jpg",
     "plate_image_path": "uploads/plate-images/plate_108_20251222T123301851Z_1b7de904.jpg"
   },
@@ -263,6 +301,102 @@ step 2 hold under concurrent ingestion.
 
 > A 5-second interval is 12 requests/minute per poller, well inside the default limit of 300/minute.
 
+### `POST /api/vehicles`
+
+Internal dashboard: register a vehicle, or renew one that is already on the registry.
+
+```bash
+curl -X POST http://localhost:5050/api/vehicles \
+  -H "Content-Type: application/json" \
+  -H "Authorization: $API_KEY" \
+  -d '{
+    "vehicle_number": "MH12AB1234",
+    "name": "Ramesh Kumar",
+    "phone_number": "+91 9876543210",
+    "valid_till": "2027-03-31"
+  }'
+```
+
+**Field rules**
+
+| Field | Required | Rule |
+| --- | --- | --- |
+| `vehicle_number` | yes | 3–20 chars, `A-Z 0-9 -`, stored uppercase — unique |
+| `name` | yes | string, ≤ 150 chars |
+| `phone_number` | yes | 6–20 characters of digits, optional `+`, spaces/hyphens allowed |
+| `valid_till` | yes | `YYYY-MM-DD` or ISO 8601 datetime; a plain date covers the **whole** day |
+
+**201 Created** (a new plate) / **200 OK** (an existing plate was renewed — `created: false`)
+
+```json
+{
+  "success": true,
+  "message": "Vehicle registered successfully.",
+  "created": true,
+  "data": {
+    "id": "6a7378aa86d8e0aa080d4f95",
+    "vehicle_number": "MH12AB1234",
+    "name": "Ramesh Kumar",
+    "phone_number": "+91 9876543210",
+    "valid_till": "2027-03-31T23:59:59.999Z",
+    "status": "registered",
+    "days_remaining": 239,
+    "created_at": "2026-08-05T17:53:46.014Z",
+    "updated_at": "2026-08-05T17:53:46.014Z"
+  },
+  "requestId": "999e9050-8b0f-4096-9e34-93384819a14f"
+}
+```
+
+A plate is unique, so **re-posting one renews it** rather than failing — that is how an expired
+vehicle is brought back, and it keeps exactly one row per plate. `created` tells the dashboard which
+happened. Posting a `valid_till` that is already in the past is allowed; it simply stores a vehicle
+whose `status` is `unregistered`.
+
+### `GET /api/vehicles`
+
+The dashboard table. Offset paging with a row count (unlike the Intozi feed's cursor, a table needs
+page numbers).
+
+```bash
+curl -H "Authorization: $API_KEY" \
+  "http://localhost:5050/api/vehicles?search=MH12&status=registered&page=1&limit=25"
+```
+
+| Param | Default | Rule |
+| --- | --- | --- |
+| `search` | – | Partial, case-insensitive match on vehicle number, name **or** phone |
+| `status` | – | `registered` (inside `valid_till`) \| `unregistered` (expired) |
+| `page` | `1` | Integer ≥ 1 |
+| `limit` | `25` | Integer 1–200 |
+
+```json
+{
+  "success": true,
+  "message": "Vehicles fetched successfully.",
+  "count": 2,
+  "pagination": { "page": 1, "limit": 25, "total": 2, "total_pages": 1, "has_next": false, "has_previous": false },
+  "data": [
+    {
+      "id": "6a7378aa86d8e0aa080d4f96",
+      "vehicle_number": "DL01XY9999",
+      "name": "Anita Sharma",
+      "phone_number": "9812345678",
+      "valid_till": "2026-01-31T23:59:59.999Z",
+      "status": "unregistered",
+      "days_remaining": -185,
+      "created_at": "2026-08-05T17:53:46.225Z",
+      "updated_at": "2026-08-05T17:53:46.225Z"
+    }
+  ],
+  "requestId": "540629b8-3baf-4065-8964-db33188a4986"
+}
+```
+
+`status` and `days_remaining` are **computed from `valid_till` on every read** — never stored. A row
+cannot drift out of sync with reality, and nothing needs a scheduled job to expire it.
+`days_remaining` goes negative once lapsed, so the UI can render "expired 185 days ago" directly.
+
 ### `GET /health`
 
 ```json
@@ -288,6 +422,18 @@ Returns `503` while MongoDB is unavailable — wire this to your load balancer.
 
 ## Quick test
 
+Register a vehicle from the dashboard side first — it is what makes the detection below come back
+as `registered`:
+
+```bash
+curl -X POST http://localhost:5050/api/vehicles \
+  -H "Content-Type: application/json" \
+  -H "Authorization: $API_KEY" \
+  -d '{"vehicle_number":"UP32AB1234","name":"Ramesh Kumar","phone_number":"+91 9876543210","valid_till":"2027-03-31"}'
+```
+
+Then send a detection:
+
 ```bash
 curl -X POST http://localhost:5050/api/anpr \
   -H "Content-Type: application/json" \
@@ -297,6 +443,7 @@ curl -X POST http://localhost:5050/api/anpr \
     "device_name":"Intozi Camera 1",
     "device_unique_key":"de21ba00-c4e2-474c-9106-b3bcc50e735f",
     "cam_id":3,"transaction_id":108,
+    "vehicle_number":"UP32AB1234",
     "event_image":"/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==",
     "plate_image":"/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==",
     "created_datetime":"2025-12-22T12:33:01.744613"
@@ -338,13 +485,17 @@ done
 │   └── database.js             # Mongo connect/disconnect, retry, connection state
 ├── routes/
 │   ├── anpr.js                 # POST /api/anpr, GET /api/anpr/feed
+│   ├── vehicles.js             # POST /api/vehicles, GET /api/vehicles (dashboard)
 │   └── health.js               # GET /health, /health/ready
 ├── controllers/
-│   └── anprController.js       # Thin HTTP adapter
+│   ├── anprController.js       # Thin HTTP adapter
+│   └── vehicleController.js
 ├── services/
-│   └── anprService.js          # Ingestion (dedupe → images → insert → rollback) + Intozi feed
+│   ├── anprService.js          # Ingestion (dedupe → images → insert → rollback) + Intozi feed
+│   └── vehicleService.js       # Registry CRUD + resolveVehicleStatus (registered/unregistered)
 ├── validators/
-│   └── anprValidator.js        # express-validator rules
+│   ├── anprValidator.js        # express-validator rules
+│   └── vehicleValidator.js
 ├── middleware/
 │   ├── apiKeyAuth.js           # Constant-time API key check
 │   ├── errorHandler.js         # 404 + centralized error handler
@@ -353,7 +504,8 @@ done
 │   ├── sanitize.js             # Strips $-operators / dotted keys
 │   └── validate.js             # Runs rules → 400 with field errors
 ├── models/
-│   └── VehicleLog.js           # Mongoose schema + indexes
+│   ├── VehicleLog.js           # Detection events — Mongoose schema + indexes
+│   └── RegisteredVehicle.js    # Dashboard registry (plate → holder + valid_till)
 ├── utils/
 │   ├── AppError.js             # Operational error with status code
 │   ├── asyncHandler.js
@@ -389,8 +541,21 @@ stored whenever a camera sends them, but `GET /api/anpr/feed` always reports the
 masking list lives in `FEED_MASKED_FIELDS` (`utils/constants.js`) and is enforced in
 `anprService.toFeedRecord` — widen the feed there if Intozi's contract ever changes.
 
-`vehicle_type` defaults to `unregistered`: a vehicle counts as registered only when a camera says so
-explicitly. Documents written before this field existed therefore read back as `unregistered`.
+`vehicle_type` is stamped at ingestion from the `RegisteredVehicle` registry (see the table under
+`POST /api/anpr`), defaulting to `unregistered`. Documents written before this field existed
+therefore read back as `unregistered`.
+
+`RegisteredVehicle` is the registry the dashboard writes to:
+
+| Index | Purpose |
+| --- | --- |
+| `vehicle_number` (unique) | One row per plate — re-registering renews instead of duplicating |
+| `valid_till` | `status` filtering on the dashboard |
+| `createdAt` | Default listing order, newest first |
+
+Registration status is **derived, never stored** — `valid_till` compared against the relevant instant
+(detection time when stamping an event, request time when listing the dashboard). There is no
+`is_active` flag to go stale and no scheduled job to expire anything.
 
 ---
 

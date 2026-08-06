@@ -69,6 +69,123 @@
       ]
     },
     {
+      "name": "Dashboard - register vehicle (201)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Authorization", "value": "{{api_key}}" }
+        ],
+        "description": "Internal dashboard: add a vehicle. Re-sending the same plate renews it (200) instead of duplicating.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"vehicle_number\": \"MH12AB1234\",\n  \"name\": \"Ramesh Kumar\",\n  \"phone_number\": \"+91 9876543210\",\n  \"valid_till\": \"2027-03-31\"\n}"
+        },
+        "url": { "raw": "{{base_url}}/api/vehicles", "host": ["{{base_url}}"], "path": ["api", "vehicles"] }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 201 (created) or 200 (renewed)', () => pm.expect(pm.response.code).to.be.oneOf([200, 201]));",
+              "const v = pm.response.json().data;",
+              "pm.test('plate stored uppercase', () => pm.expect(v.vehicle_number).to.eql('MH12AB1234'));",
+              "pm.test('status derived from valid_till', () => pm.expect(v.status).to.be.oneOf(['registered', 'unregistered']));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Dashboard - list vehicles (200)",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "{{api_key}}" }],
+        "description": "Registry table for the dashboard: search, status filter, page numbers.",
+        "url": {
+          "raw": "{{base_url}}/api/vehicles?page=1&limit=25",
+          "host": ["{{base_url}}"],
+          "path": ["api", "vehicles"],
+          "query": [
+            { "key": "page", "value": "1" },
+            { "key": "limit", "value": "25", "description": "1-200, default 25" },
+            { "key": "search", "value": "MH12", "description": "plate, name or phone (partial)", "disabled": true },
+            { "key": "status", "value": "unregistered", "description": "registered | unregistered", "disabled": true }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 200', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "pm.test('paginated list', () => {",
+              "  pm.expect(body.data).to.be.an('array');",
+              "  pm.expect(body.pagination).to.have.property('total');",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Dashboard - expired vehicle (201, status unregistered)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Authorization", "value": "{{api_key}}" }
+        ],
+        "description": "A past valid_till registers the vehicle but reports it as unregistered — no cron job expires anything.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"vehicle_number\": \"DL01XY9999\",\n  \"name\": \"Anita Sharma\",\n  \"phone_number\": \"9812345678\",\n  \"valid_till\": \"2020-01-31\"\n}"
+        },
+        "url": { "raw": "{{base_url}}/api/vehicles", "host": ["{{base_url}}"], "path": ["api", "vehicles"] }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('reported unregistered', () => pm.expect(pm.response.json().data.status).to.eql('unregistered'));",
+              "pm.test('days_remaining is negative', () => pm.expect(pm.response.json().data.days_remaining).to.be.below(0));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Dashboard - invalid vehicle (400)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Authorization", "value": "{{api_key}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"vehicle_number\": \"AB\",\n  \"name\": \"\",\n  \"phone_number\": \"12\",\n  \"valid_till\": \"31-12-2026\"\n}"
+        },
+        "url": { "raw": "{{base_url}}/api/vehicles", "host": ["{{base_url}}"], "path": ["api", "vehicles"] }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": ["pm.test('status is 400', () => pm.response.to.have.status(400));"]
+          }
+        }
+      ]
+    },
+    {
       "name": "ANPR - Intozi feed (200)",
       "request": {
         "method": "GET",
