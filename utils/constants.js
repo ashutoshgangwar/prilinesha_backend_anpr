@@ -36,6 +36,14 @@ const LIST_DEFAULT_LIMIT = 25;
 const LIST_MAX_LIMIT = 100;
 
 /**
+ * Page sizes for the dashboard's detection-log table. Higher ceiling than the
+ * other lists because a log is the one table an operator genuinely scrolls, and
+ * the rows are narrow.
+ */
+const LOG_DEFAULT_LIMIT = 25;
+const LOG_MAX_LIMIT = 200;
+
+/**
  * What kind of site a project is. Chosen by the super admin when the project is
  * created, and fixed thereafter in practice — a parking lot does not become a
  * society. Nothing branches on it yet; it exists so the dashboard can group and
@@ -149,6 +157,8 @@ module.exports = {
   REGISTRY_MAX_LIMIT,
   LIST_DEFAULT_LIMIT,
   LIST_MAX_LIMIT,
+  LOG_DEFAULT_LIMIT,
+  LOG_MAX_LIMIT,
   PROJECT_TYPES,
   ROLES,
   ROLE_VALUES,

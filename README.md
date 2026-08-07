@@ -219,6 +219,7 @@ A plate is **registered** only while a registration *in that project* covers it.
 | `PATCH /api/users/{id}/role` · `/status` | Bearer JWT | super admin |
 | `POST /api/users/{id}/reset-password` | Bearer JWT | super admin |
 | `POST /api/vehicles` · `GET /api/vehicles` | Bearer JWT | scoped to the caller |
+| `GET /api/logs` | Bearer JWT | scoped to the caller |
 | `POST /api/anpr` · `GET /api/anpr/feed` | API key | camera / Intozi |
 
 Full request and response schemas are in Swagger at `/api-docs`.
@@ -699,6 +700,87 @@ curl -H "Authorization: Bearer $TOKEN" \
 `status` and `days_remaining` are **computed from `valid_till` on every read** — never stored. A row
 cannot drift out of sync with reality, and nothing needs a scheduled job to expire it.
 `days_remaining` goes negative once lapsed, so the UI can render "expired 185 days ago" directly.
+
+---
+
+### `GET /api/logs`
+
+The detection log for the internal dashboard — the ANPR events themselves, with the owner resolved.
+**Dashboard only:** a dashboard JWT is the only credential accepted, so a camera or Intozi API key
+cannot read it. That separation is the point — `GET /api/feed` reads the *registry* and discloses
+three fields, this reads the *events* and names the owner.
+
+Restricted to the caller's projects, on the same rules as `GET /api/vehicles`: a super admin sees
+every project, a customer admin only their assigned ones, an unassigned account an empty list rather
+than everything. `?group_id=` narrows to one; naming a project outside your scope is a `403`, not a
+quiet empty page.
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:5050/api/logs?group_id=ACME_MALL&from=2026-08-01&to=2026-08-07&page=1&limit=25"
+```
+
+| Param | Default | Rule |
+| --- | --- | --- |
+| `group_id` | – | Narrow to one project. `403` if it is outside your scope. |
+| `search` | – | Partial, case-insensitive match on vehicle number, owner name **or** vehicle model |
+| `vehicle_type` | – | `registered` \| `unregistered` |
+| `device_name` | – | Exact gate, matched case-insensitively |
+| `from` | – | `YYYY-MM-DD` (from 00:00:00 UTC) or ISO 8601 datetime |
+| `to` | – | `YYYY-MM-DD` covers the **whole** day, or ISO 8601 datetime |
+| `page` | `1` | Integer ≥ 1 |
+| `limit` | `25` | Integer 1–200 |
+
+```json
+{
+  "success": true,
+  "message": "Vehicle logs fetched successfully.",
+  "count": 2,
+  "pagination": { "page": 1, "limit": 25, "total": 2, "total_pages": 1, "has_next": false, "has_previous": false },
+  "data": [
+    {
+      "id": "6b8f21c4d9e3a70f1c45b902",
+      "group_id": "ACME_MALL",
+      "device_name": "entry1",
+      "vehicle_number": "HR26DK8337",
+      "vehicle_type": "registered",
+      "vehicle_model": "Swift Dzire",
+      "owner_name": "Ravi Sharma",
+      "owner_name_source": "registry",
+      "detected_at": "2026-08-05T10:00:00.000Z",
+      "received_at": "2026-08-05T10:00:05.000Z"
+    },
+    {
+      "id": "6b8f21c4d9e3a70f1c45b903",
+      "group_id": "ACME_MALL",
+      "device_name": "exit1",
+      "vehicle_number": "UP16XY9999",
+      "vehicle_type": "unregistered",
+      "vehicle_model": null,
+      "owner_name": null,
+      "owner_name_source": null,
+      "detected_at": "2026-08-04T09:00:00.000Z",
+      "received_at": "2026-08-04T09:00:02.000Z"
+    }
+  ],
+  "requestId": "540629b8-3baf-4065-8964-db33188a4986"
+}
+```
+
+**`owner_name`** comes from the event when the camera sent one, and otherwise from the
+registered-vehicle registry matched on `(group_id, vehicle_number)` — Intozi normally sends no
+owner, so the registry is where the name actually lives. `owner_name_source` says which answered
+(`event`, `registry`, or `null` when the plate is unknown to both). The registry lookup is one
+bounded query per page, not one per row, and it never crosses projects: the same plate can be Ravi
+at one site and a stranger at another.
+
+**`vehicle_type`** is the status as judged *when the vehicle was seen*, read from the event — so a
+registration expiring today cannot rewrite last week's rows.
+
+Rows are sorted by `detected_at` (when the camera saw it) descending, with `_id` breaking ties so no
+row can appear on two pages. The response is built field by field rather than by hiding columns, so
+the contact details stored on an event — `contact_no`, `email`, `driver_name` — never appear here,
+and a column added to `VehicleLog` later cannot leak by default.
 
 ### `GET /health`
 

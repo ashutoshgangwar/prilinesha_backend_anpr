@@ -11,7 +11,7 @@ const {
   PERMISSIONS,
 } = require('../utils/constants');
 
-const { authPaths, projectPaths, userPaths } = require('./swaggerAuthPaths');
+const { authPaths, projectPaths, userPaths, logPaths } = require('./swaggerAuthPaths');
 const { authSchemas } = require('./swaggerAuthSchemas');
 
 /** OpenAPI 3.0 description of the public surface, served at /api-docs. */
@@ -63,6 +63,7 @@ const swaggerSpec = {
     { name: 'Projects', description: 'Projects (group_id) and their gates (device_name)' },
     { name: 'Users', description: 'Dashboard user administration — super admin only' },
     { name: 'Vehicles', description: 'Registered-vehicle registry, scoped per project' },
+    { name: 'Logs', description: 'Detection log for the internal dashboard, scoped to the caller' },
     { name: 'ANPR', description: 'Event ingestion and the Intozi polling feed' },
     { name: 'System', description: 'Health probes' },
   ],
@@ -398,6 +399,7 @@ const swaggerSpec = {
     ...authPaths,
     ...projectPaths,
     ...userPaths,
+    ...logPaths,
 
     // Cameras / Intozi: API-key authenticated, scoped to the key's project.
     '/api': {

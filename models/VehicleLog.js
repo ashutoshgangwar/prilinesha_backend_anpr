@@ -95,7 +95,16 @@ vehicleLogSchema.index(
   { name: 'idx_group_vehicle_number_created' }
 );
 
-// Time-range reports.
+// The dashboard's log table: one project's detections, newest first. Without
+// group_id leading, a customer admin's default listing sorts the whole
+// collection and then filters, which is the query that degrades first as
+// events accumulate.
+vehicleLogSchema.index(
+  { group_id: 1, created_datetime: -1 },
+  { name: 'idx_group_created_datetime' }
+);
+
+// Time-range reports, and the super admin's unscoped view of the same table.
 vehicleLogSchema.index({ created_datetime: -1 }, { name: 'idx_created_datetime' });
 
 // Intozi polling feed: keyset pagination over (received_at, _id) ascending,

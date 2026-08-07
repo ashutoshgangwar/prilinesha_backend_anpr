@@ -560,6 +560,72 @@ const authSchemas = ({ ROLE_VALUES, PERMISSIONS, LIST_MAX_LIMIT }) => ({
     },
   },
 
+  // -------------------------------------------------------------------- logs
+  VehicleLogRecord: {
+    type: 'object',
+    description:
+      'One detection, as the internal dashboard shows it. Built field by field rather than by ' +
+      'hiding columns, so contact details stored on the event — the driver’s phone number, their ' +
+      'email — cannot appear here by default.',
+    properties: {
+      id: { type: 'string', example: '6b8f21c4d9e3a70f1c45b902' },
+      group_id: {
+        type: 'string',
+        nullable: true,
+        description: 'Null only on events ingested with the legacy unscoped API key.',
+        example: 'ACME_MALL',
+      },
+      device_name: { type: 'string', nullable: true, example: 'entry1' },
+      vehicle_number: { type: 'string', nullable: true, example: 'HR26DK8337' },
+      vehicle_type: {
+        type: 'string',
+        enum: ['registered', 'unregistered'],
+        description:
+          'Status as judged when the vehicle was seen, not as it stands now — a registration ' +
+          'expiring today cannot rewrite last week’s detections.',
+        example: 'registered',
+      },
+      vehicle_model: { type: 'string', nullable: true, example: 'Swift Dzire' },
+      owner_name: {
+        type: 'string',
+        nullable: true,
+        description:
+          'From the event when the camera sent one, otherwise from the registered-vehicle ' +
+          'registry matched on (group_id, vehicle_number). Null when neither knows the plate.',
+        example: 'Ravi Sharma',
+      },
+      owner_name_source: {
+        type: 'string',
+        nullable: true,
+        enum: ['event', 'registry', null],
+        description: 'Which source answered, so the UI can tell a match from a camera-supplied name.',
+        example: 'registry',
+      },
+      detected_at: {
+        type: 'string',
+        format: 'date-time',
+        description: 'When the camera saw the vehicle. This is the sort column.',
+      },
+      received_at: {
+        type: 'string',
+        format: 'date-time',
+        description: 'When this API recorded it. Later than detected_at on a delayed delivery.',
+      },
+    },
+  },
+
+  VehicleLogList: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean', example: true },
+      message: { type: 'string', example: 'Vehicle logs fetched successfully.' },
+      count: { type: 'integer', example: 25 },
+      pagination: { $ref: '#/components/schemas/Pagination' },
+      data: { type: 'array', items: { $ref: '#/components/schemas/VehicleLogRecord' } },
+      requestId: { type: 'string', format: 'uuid' },
+    },
+  },
+
   // Shared by every offset-paged list.
   Pagination: {
     type: 'object',

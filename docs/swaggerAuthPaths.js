@@ -493,4 +493,84 @@ const userPaths = {
   },
 };
 
-module.exports = { authPaths, projectPaths, userPaths };
+// ---------------------------------------------------------------------- logs
+const logPaths = {
+  '/api/logs': {
+    get: {
+      tags: ['Logs'],
+      summary: 'Detection log for the internal dashboard',
+      description:
+        'The ANPR events themselves, with the owner resolved — **dashboard only**. A dashboard JWT ' +
+        'is the only credential accepted, so a camera or Intozi API key cannot read this. That is ' +
+        'the separation that matters: `GET /api/feed` reads the *registry* and discloses three ' +
+        'fields, while this reads the *events* and names the owner.\n\n' +
+        'Scoped to the caller. A super admin reads every project; a customer admin reads only the ' +
+        'projects assigned to them; an account with no assignments sees nothing at all rather than ' +
+        'everything. Omit `group_id` for all of the caller’s projects, or name one to narrow — ' +
+        'naming a project outside the caller’s scope is a 403, not an empty list.\n\n' +
+        '`owner_name` comes from the event when the camera sent one, and otherwise from the ' +
+        'registered-vehicle registry matched on `(group_id, vehicle_number)`; `owner_name_source` ' +
+        'says which, or is null when the plate is unknown. `vehicle_type` is the status as judged ' +
+        'at detection time, so a registration expiring today cannot rewrite last week’s rows.',
+      security: [{ BearerAuth: [] }],
+      parameters: [
+        {
+          name: 'group_id',
+          in: 'query',
+          schema: { type: 'string', example: 'ACME_MALL' },
+          description: 'Narrow to one project. Omit for every project the caller can see.',
+        },
+        {
+          name: 'search',
+          in: 'query',
+          schema: { type: 'string', maxLength: 100 },
+          description:
+            'Partial, case-insensitive match on vehicle number, owner name or vehicle model — the ' +
+            'three columns this table shows.',
+        },
+        {
+          name: 'vehicle_type',
+          in: 'query',
+          schema: { type: 'string', enum: ['registered', 'unregistered'] },
+        },
+        {
+          name: 'device_name',
+          in: 'query',
+          schema: { type: 'string', example: 'entry1' },
+          description: 'Exact gate, matched case-insensitively.',
+        },
+        {
+          name: 'from',
+          in: 'query',
+          schema: { type: 'string', example: '2026-08-01' },
+          description:
+            'Detections at or after this instant. A bare date starts at 00:00:00 UTC of that day; ' +
+            'a timestamp with no offset is read as UTC.',
+        },
+        {
+          name: 'to',
+          in: 'query',
+          schema: { type: 'string', example: '2026-08-07' },
+          description:
+            'Detections at or before this instant. A bare date covers the **whole** day — ' +
+            '`to=2026-08-07` includes the 7th.',
+        },
+        { name: 'page', in: 'query', schema: { type: 'integer', minimum: 1, default: 1 } },
+        {
+          name: 'limit',
+          in: 'query',
+          schema: { type: 'integer', minimum: 1, maximum: 200, default: 25 },
+        },
+      ],
+      responses: {
+        200: { description: 'Detections', content: json('#/components/schemas/VehicleLogList') },
+        400: errors[400],
+        401: errors[401],
+        403: { description: 'group_id is outside your scope', content: json('#/components/schemas/ErrorResponse') },
+        500: errors[500],
+      },
+    },
+  },
+};
+
+module.exports = { authPaths, projectPaths, userPaths, logPaths };
