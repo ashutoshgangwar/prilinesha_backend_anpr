@@ -4,7 +4,7 @@ const AppError = require('../utils/AppError');
 const logger = require('../utils/logger');
 const { saveEventImages, removeFiles } = require('../utils/imageStorage');
 const { encodeCursor, decodeCursor } = require('../utils/feedCursor');
-const { resolveVehicleStatus, statusAt } = require('./vehicleService');
+const { resolveVehicleStatus, statusOf } = require('./vehicleService');
 const { touchDevice } = require('./projectService');
 const {
   DEFAULT_VEHICLE_TYPE,
@@ -175,11 +175,11 @@ const createAnprEvent = async (payload, { project, requestId } = {}) => {
 const toFeedRecord = (record, now) => ({
   vehicle_number: record.vehicle_number ?? null,
   group_id: record.group_id ?? null,
-  // Derived, never stored: the moment valid_till passes, the plate reads as
-  // unregistered without anyone having to flip a flag.
-  vehicle_type: record.valid_till
-    ? statusAt(record.valid_till, now)
-    : DEFAULT_VEHICLE_TYPE,
+  // Derived, never stored, from the same two fields the dashboard reads: the
+  // moment valid_till passes the plate reads as unregistered without anyone
+  // flipping a flag, and a registration switched off on the dashboard reads as
+  // unregistered here on the very next poll.
+  vehicle_type: record.valid_till ? statusOf(record, now) : DEFAULT_VEHICLE_TYPE,
 });
 
 /**
@@ -231,10 +231,15 @@ const getVehicleFeed = async (
 
   const filter = { ...scopeFilter };
 
-  // Status is derived, not stored, so filtering by it is a date comparison
-  // rather than an equality match on a column.
-  if (vehicleType === 'registered') filter.valid_till = { $gte: now };
-  else if (vehicleType === 'unregistered') filter.valid_till = { $lt: now };
+  // Status is derived, not stored, so filtering by it compares the date and the
+  // manual switch rather than matching a column. Both halves must hold for
+  // registered; either failing is enough for unregistered.
+  if (vehicleType === 'registered') {
+    filter.is_active = { $ne: false };
+    filter.valid_till = { $gte: now };
+  } else if (vehicleType === 'unregistered') {
+    filter.$and = [{ $or: [{ is_active: false }, { valid_till: { $lt: now } }] }];
+  }
 
   let position = null;
 
@@ -255,7 +260,9 @@ const getVehicleFeed = async (
     filter.updatedAt = { $gt: since };
   }
 
-  const projection = 'vehicle_number group_id valid_till updatedAt';
+  // is_active is read but never emitted — it feeds vehicle_type, which is the
+  // only form the feed discloses it in.
+  const projection = 'vehicle_number group_id valid_till is_active updatedAt';
 
   // Always oldest-first, including the very first call.
   //

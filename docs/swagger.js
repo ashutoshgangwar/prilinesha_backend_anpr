@@ -15,6 +15,15 @@ const { authPaths, projectPaths, userPaths, logPaths } = require('./swaggerAuthP
 const { authSchemas } = require('./swaggerAuthSchemas');
 
 /** OpenAPI 3.0 description of the public surface, served at /api-docs. */
+/** The `{id}` path parameter shared by the single-registration routes. */
+const vehicleIdParam = {
+  name: 'id',
+  in: 'path',
+  required: true,
+  schema: { type: 'string', example: '6a7378aa86d8e0aa080d4f96' },
+  description: 'The registration id returned by POST or GET /api/vehicles.',
+};
+
 const swaggerSpec = {
   openapi: '3.0.3',
   info: {
@@ -262,6 +271,19 @@ const swaggerSpec = {
           },
           name: { type: 'string', maxLength: 150, example: 'Ramesh Kumar' },
           phone_number: { type: 'string', example: '+91 9876543210' },
+          vehicle_model: {
+            type: 'string',
+            nullable: true,
+            maxLength: 100,
+            description:
+              'Optional. Make and model as the operator types it — free text, because it is a ' +
+              'note that helps somebody recognise the vehicle at the gate and nothing branches ' +
+              'on it.\n\n' +
+              'Surfaces on `GET /api/logs` as `vehicle_model` whenever the camera did not report ' +
+              'one itself. Omitting it on a **renewal** keeps whatever model is already recorded, ' +
+              'rather than clearing it.',
+            example: 'Swift Dzire',
+          },
           valid_till: {
             type: 'string',
             description:
@@ -290,17 +312,67 @@ const swaggerSpec = {
           device_names: { type: 'array', items: { type: 'string' }, example: [] },
           name: { type: 'string', example: 'Ramesh Kumar' },
           phone_number: { type: 'string', example: '+91 9876543210' },
+          vehicle_model: {
+            type: 'string',
+            nullable: true,
+            description: 'As recorded by the operator. Null when none was entered.',
+            example: 'Swift Dzire',
+          },
           valid_till: { type: 'string', format: 'date-time', example: '2027-03-31T23:59:59.999Z' },
+          is_active: {
+            type: 'boolean',
+            description:
+              'The manual switch, set from the dashboard via `PATCH /api/vehicles/{id}/status`. ' +
+              'false reports the plate as unregistered at every gate whatever valid_till says.',
+            example: true,
+          },
           status: {
             type: 'string',
             enum: VEHICLE_TYPES,
-            description: 'Derived from valid_till at read time — never stored, so it cannot go stale.',
+            description:
+              'What the barrier will actually do. Derived at read time from `is_active` and ' +
+              '`valid_till` together — never stored, so it cannot go stale and needs no cron job. ' +
+              '`registered` requires both: switched on **and** in date.',
             example: 'registered',
+          },
+          inactive_reason: {
+            type: 'string',
+            nullable: true,
+            enum: ['deactivated', 'expired', null],
+            description:
+              'Why it is unregistered, so the UI can distinguish "we suspended this" from "the pass ' +
+              'ran out" instead of showing one ambiguous badge. Null while registered. ' +
+              '`deactivated` wins when both apply.',
+            example: null,
           },
           days_remaining: {
             type: 'integer',
-            description: 'Negative once expired (e.g. -185 means it lapsed 185 days ago).',
+            description:
+              'Negative once expired (e.g. -185 means it lapsed 185 days ago). Still reported for a ' +
+              'deactivated vehicle, whose pass keeps running down while it is switched off.',
             example: 239,
+          },
+          registered_by: {
+            type: 'object',
+            nullable: true,
+            description:
+              'Who originally added the vehicle. Preserved across renewals and edits by anyone ' +
+              'else. Null on rows created before this was recorded.',
+            properties: {
+              id: { type: 'string', example: '6a7378aa86d8e0aa080d4f95' },
+              name: { type: 'string', nullable: true, example: 'Ravi Sharma' },
+              email: { type: 'string', nullable: true, example: 'ravi@acmemall.com' },
+            },
+          },
+          updated_by: {
+            type: 'object',
+            nullable: true,
+            description: 'Who last edited, deactivated or reactivated it.',
+            properties: {
+              id: { type: 'string' },
+              name: { type: 'string', nullable: true },
+              email: { type: 'string', nullable: true },
+            },
           },
           created_at: { type: 'string', format: 'date-time' },
           updated_at: { type: 'string', format: 'date-time' },
@@ -586,7 +658,26 @@ const swaggerSpec = {
             in: 'query',
             required: false,
             schema: { type: 'string', enum: VEHICLE_TYPES },
-            description: '`registered` = still inside valid_till; `unregistered` = expired.',
+            description:
+              'The **effective** status. `registered` = switched on AND inside valid_till; ' +
+              '`unregistered` = expired **or** deactivated.',
+          },
+          {
+            name: 'is_active',
+            in: 'query',
+            required: false,
+            schema: { type: 'boolean' },
+            description:
+              'The manual switch on its own — the question `status` cannot answer, since it folds ' +
+              'expiry in. `is_active=false` lists what has been suspended; ' +
+              '`is_active=true&status=unregistered` lists what merely lapsed.',
+          },
+          {
+            name: 'registered_by',
+            in: 'query',
+            required: false,
+            schema: { type: 'string', example: '6a7378aa86d8e0aa080d4f95' },
+            description: 'Only vehicles added by this user — "what did this operator enter?".',
           },
           {
             name: 'page',
@@ -621,6 +712,110 @@ const swaggerSpec = {
         },
       },
     },
+
+    // The single-record routes scope by folding the caller's projects into the
+    // query, so a vehicle in another customer's project is a 404, not a 403 —
+    // an object id is opaque and guessable in bulk, and "exists, but not yours"
+    // would confirm which ids are real.
+    '/api/vehicles/{id}': {
+      get: {
+        tags: ['Vehicles'],
+        summary: 'One registration',
+        security: [{ BearerAuth: [] }],
+        parameters: [vehicleIdParam],
+        responses: {
+          200: {
+            description: 'Registration',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/RegisteredVehicleSaved' } } },
+          },
+          400: { $ref: '#/components/responses/BadRequest' },
+          401: { $ref: '#/components/responses/Unauthorized' },
+          404: { $ref: '#/components/responses/NotFound' },
+          500: { $ref: '#/components/responses/ServerError' },
+        },
+      },
+      patch: {
+        tags: ['Vehicles'],
+        summary: 'Edit a registration',
+        description:
+          'Only the fields sent change — omitting `device_names` leaves the gate list alone, while ' +
+          'sending an explicit `[]` widens a restricted registration back to every gate.\n\n' +
+          '`group_id` and `vehicle_number` cannot be edited: together they are the row’s identity, ' +
+          'and changing either is registering a different vehicle. A body that changes nothing is ' +
+          'a 400, so a mistyped field name cannot look like a successful edit.',
+        security: [{ BearerAuth: [] }],
+        parameters: [vehicleIdParam],
+        requestBody: {
+          required: true,
+          content: { 'application/json': { schema: { $ref: '#/components/schemas/UpdateVehicleRequest' } } },
+        },
+        responses: {
+          200: {
+            description: 'Updated',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/RegisteredVehicleSaved' } } },
+          },
+          400: { $ref: '#/components/responses/BadRequest' },
+          401: { $ref: '#/components/responses/Unauthorized' },
+          404: { $ref: '#/components/responses/NotFound' },
+          500: { $ref: '#/components/responses/ServerError' },
+        },
+      },
+      delete: {
+        tags: ['Vehicles'],
+        summary: 'Delete a registration',
+        description:
+          '**Prefer deactivating.** A deleted row loses who registered it and when, and the plate ' +
+          'becomes indistinguishable from one never registered. Deleting is right for a record ' +
+          'entered by mistake, not for a resident who moved out.\n\n' +
+          'Detections already logged are untouched — `VehicleLog` stores the status as judged at ' +
+          'detection time, not a reference to this row.',
+        security: [{ BearerAuth: [] }],
+        parameters: [vehicleIdParam],
+        responses: {
+          200: {
+            description: 'Deleted',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/VehicleDeleted' } } },
+          },
+          400: { $ref: '#/components/responses/BadRequest' },
+          401: { $ref: '#/components/responses/Unauthorized' },
+          404: { $ref: '#/components/responses/NotFound' },
+          500: { $ref: '#/components/responses/ServerError' },
+        },
+      },
+    },
+
+    '/api/vehicles/{id}/status': {
+      patch: {
+        tags: ['Vehicles'],
+        summary: 'Mark a vehicle registered or unregistered',
+        description:
+          'The manual half of the status. `is_active: false` reports the plate as **unregistered** ' +
+          'at every gate immediately, whatever `valid_till` says — for a resident who moved out, or ' +
+          'a pass suspended pending payment. `true` restores it.\n\n' +
+          'Stored on the record and live on Intozi’s next poll: the feed, the ingestion-time ' +
+          'decision and this table all derive status from the same two fields, so there is nothing ' +
+          'to synchronise and nothing that can drift.\n\n' +
+          'The other half is `valid_till`, and time owns that — expiry needs no cron job, and no ' +
+          'stored `status` column exists that could disagree with either.',
+        security: [{ BearerAuth: [] }],
+        parameters: [vehicleIdParam],
+        requestBody: {
+          required: true,
+          content: { 'application/json': { schema: { $ref: '#/components/schemas/SetVehicleStatusRequest' } } },
+        },
+        responses: {
+          200: {
+            description: 'Status changed',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/RegisteredVehicleSaved' } } },
+          },
+          400: { $ref: '#/components/responses/BadRequest' },
+          401: { $ref: '#/components/responses/Unauthorized' },
+          404: { $ref: '#/components/responses/NotFound' },
+          500: { $ref: '#/components/responses/ServerError' },
+        },
+      },
+    },
+
     '/health': {
       get: {
         tags: ['System'],

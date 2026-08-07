@@ -219,6 +219,8 @@ A plate is **registered** only while a registration *in that project* covers it.
 | `PATCH /api/users/{id}/role` · `/status` | Bearer JWT | super admin |
 | `POST /api/users/{id}/reset-password` | Bearer JWT | super admin |
 | `POST /api/vehicles` · `GET /api/vehicles` | Bearer JWT | scoped to the caller |
+| `GET·PATCH·DELETE /api/vehicles/{id}` | Bearer JWT | scoped to the caller |
+| `PATCH /api/vehicles/{id}/status` | Bearer JWT | scoped to the caller |
 | `GET /api/logs` | Bearer JWT | scoped to the caller |
 | `POST /api/anpr` · `GET /api/anpr/feed` | API key | camera / Intozi |
 
@@ -606,6 +608,7 @@ curl -X POST http://localhost:5050/api/vehicles \
     "vehicle_number": "MH12AB1234",
     "name": "Ramesh Kumar",
     "phone_number": "+91 9876543210",
+    "vehicle_model": "Swift Dzire",
     "valid_till": "2027-03-31"
   }'
 ```
@@ -618,8 +621,14 @@ curl -X POST http://localhost:5050/api/vehicles \
 | `vehicle_number` | yes | 3–20 chars, `A-Z 0-9 -`, stored uppercase — unique **within the project** |
 | `name` | yes | string, ≤ 150 chars |
 | `phone_number` | yes | 6–20 characters of digits, optional `+`, spaces/hyphens allowed |
+| `vehicle_model` | no | Make and model as the operator types it — free text, ≤ 100 chars. Surfaces on `GET /api/logs` when the camera reports no model of its own. |
 | `valid_till` | yes | `YYYY-MM-DD` or ISO 8601 datetime; a plain date covers the **whole** day |
 | `device_names` | no | Restrict to specific gates. Empty/omitted = every gate in the project. |
+
+Omitting `vehicle_model` on a **renewal** keeps whatever model is already recorded, rather than
+clearing it — the required fields above are always re-sent, but silently wiping optional data
+because somebody did not retype it is how a registry loses information. Clear one explicitly with
+`PATCH /api/vehicles/{id}` and `"vehicle_model": null`.
 
 **201 Created** (a new plate) / **200 OK** (an existing plate was renewed — `created: false`)
 
@@ -635,6 +644,7 @@ curl -X POST http://localhost:5050/api/vehicles \
     "device_names": [],
     "name": "Ramesh Kumar",
     "phone_number": "+91 9876543210",
+    "vehicle_model": "Swift Dzire",
     "valid_till": "2027-03-31T23:59:59.999Z",
     "status": "registered",
     "days_remaining": 239,
@@ -668,8 +678,10 @@ curl -H "Authorization: Bearer $TOKEN" \
 | Param | Default | Rule |
 | --- | --- | --- |
 | `group_id` | – | Narrow to one project. `403` if it is outside your scope. |
-| `search` | – | Partial, case-insensitive match on vehicle number, name **or** phone |
-| `status` | – | `registered` (inside `valid_till`) \| `unregistered` (expired) |
+| `search` | – | Partial, case-insensitive match on vehicle number, name, phone **or** model |
+| `status` | – | Effective status: `registered` (switched on **and** in date) \| `unregistered` (expired **or** deactivated) |
+| `is_active` | – | The manual switch alone. `false` = what you have suspended |
+| `registered_by` | – | User id — "what did this operator enter?" |
 | `page` | `1` | Integer ≥ 1 |
 | `limit` | `25` | Integer 1–200 |
 
@@ -684,11 +696,17 @@ curl -H "Authorization: Bearer $TOKEN" \
       "id": "6a7378aa86d8e0aa080d4f96",
       "group_id": "ACME_MALL",
       "vehicle_number": "DL01XY9999",
+      "device_names": [],
       "name": "Anita Sharma",
       "phone_number": "9812345678",
+      "vehicle_model": "Alto K10",
       "valid_till": "2026-01-31T23:59:59.999Z",
+      "is_active": true,
       "status": "unregistered",
+      "inactive_reason": "expired",
       "days_remaining": -185,
+      "registered_by": { "id": "6a7378aa86d8e0aa080d4f95", "name": "Ravi Sharma", "email": "ravi@acmemall.com" },
+      "updated_by": { "id": "6a7378aa86d8e0aa080d4f95", "name": "Ravi Sharma", "email": "ravi@acmemall.com" },
       "created_at": "2026-08-05T17:53:46.225Z",
       "updated_at": "2026-08-05T17:53:46.225Z"
     }
@@ -697,9 +715,114 @@ curl -H "Authorization: Bearer $TOKEN" \
 }
 ```
 
-`status` and `days_remaining` are **computed from `valid_till` on every read** — never stored. A row
-cannot drift out of sync with reality, and nothing needs a scheduled job to expire it.
-`days_remaining` goes negative once lapsed, so the UI can render "expired 185 days ago" directly.
+`status` and `days_remaining` are **computed on every read** — never stored. A row cannot drift out
+of sync with reality, and nothing needs a scheduled job to expire it. `days_remaining` goes negative
+once lapsed, so the UI can render "expired 185 days ago" directly.
+
+---
+
+### `GET /api/vehicles/{id}`
+
+One registration, same shape as a list row. A vehicle in another customer's project is a **404**, not
+a `403` — an object id is opaque and guessable in bulk, and answering "that exists, but it is not
+yours" would confirm which ids are real, and for whom.
+
+---
+
+### `PATCH /api/vehicles/{id}`
+
+Edits a registration. Only the fields sent change.
+
+```json
+{ "name": "Ravi K Sharma", "vehicle_model": "Swift Dzire VXi", "valid_till": "2028-03-31" }
+```
+
+| Field | Rule |
+| --- | --- |
+| `name` | ≤150 chars |
+| `phone_number` | 6–20 digits, optional `+` |
+| `vehicle_model` | Free text ≤100 chars. `null` or `""` clears it |
+| `valid_till` | `YYYY-MM-DD` (whole day) or ISO 8601 |
+| `device_names` | Gate list. Omit to leave alone; send `[]` to widen back to every gate |
+| `is_active` | Also settable here, though `/status` below is the endpoint for toggling alone |
+
+`group_id` and `vehicle_number` are **not editable** — together they are the row's identity and its
+unique index, so changing either is registering a different vehicle (that's a POST). Allowing it
+would also let a customer admin move a record into a project they cannot see. A body that changes
+nothing is a `400`, so a mistyped field name cannot look like a successful edit.
+
+`registered_by` survives an edit by someone else; `updated_by` records who touched it last.
+
+---
+
+### `PATCH /api/vehicles/{id}/status` — mark registered / unregistered
+
+```json
+{ "is_active": false }
+```
+
+```json
+{
+  "success": true,
+  "message": "Vehicle deactivated. It reads as unregistered at every gate until reactivated.",
+  "data": {
+    "id": "6a7378aa86d8e0aa080d4f96",
+    "vehicle_number": "DL01XY9999",
+    "is_active": false,
+    "status": "unregistered",
+    "inactive_reason": "deactivated",
+    "valid_till": "2027-12-31T23:59:59.999Z",
+    "days_remaining": 511,
+    "...": "..."
+  },
+  "requestId": "540629b8-3baf-4065-8964-db33188a4986"
+}
+```
+
+**Two things decide status, and both must hold for a plate to read as registered:**
+
+| | Owned by | Stored? |
+| --- | --- | --- |
+| `valid_till` in the future | time | yes, as a date |
+| `is_active` true | the dashboard user | yes, as a flag |
+
+`is_active: false` reports the plate as **unregistered at every gate immediately**, whatever
+`valid_till` says — for a resident who moved out, or a pass suspended pending payment. `true`
+restores it. `valid_till` is untouched either way, so the pass keeps running down while suspended.
+
+There is deliberately **no stored `status` column**. One would have to be rewritten by a cron job the
+instant a pass expired, and would silently disagree with `valid_till` the moment that job failed.
+Instead the flag is the only thing a person can set, and the three places that need the status —
+the dashboard table, the ingestion-time decision in `POST /api/anpr`, and the Intozi feed — all
+derive it from the same two fields through one function. Deactivating is therefore live on Intozi's
+next poll and on the very next detection, with nothing to synchronise.
+
+`inactive_reason` (`deactivated` \| `expired` \| `null`) lets the UI tell "we suspended this" apart
+from "the pass ran out" instead of showing one ambiguous badge.
+
+Re-registering a suspended plate via `POST /api/vehicles` switches it **back on** — submitting the
+registration form is an explicit "this vehicle is allowed until X", and leaving it deactivated would
+hand back a record saying registered and a barrier that refuses to open.
+
+---
+
+### `DELETE /api/vehicles/{id}`
+
+```json
+{
+  "success": true,
+  "message": "Vehicle registration deleted.",
+  "data": { "id": "6a7378aa86d8e0aa080d4f96", "group_id": "ACME_MALL", "vehicle_number": "DL01XY9999" },
+  "requestId": "540629b8-3baf-4065-8964-db33188a4986"
+}
+```
+
+**Prefer deactivating.** A deleted row loses who registered it and when, and the plate becomes
+indistinguishable from one that was never registered. Deleting is right for a record entered by
+mistake, not for a resident who moved out.
+
+Detections already logged are untouched — `VehicleLog` stores the status as judged at detection time,
+not a reference to this row, so the history of what the barrier actually did stays intact.
 
 ---
 
@@ -745,6 +868,7 @@ curl -H "Authorization: Bearer $TOKEN" \
       "vehicle_number": "HR26DK8337",
       "vehicle_type": "registered",
       "vehicle_model": "Swift Dzire",
+      "vehicle_model_source": "registry",
       "owner_name": "Ravi Sharma",
       "owner_name_source": "registry",
       "detected_at": "2026-08-05T10:00:00.000Z",
@@ -757,6 +881,7 @@ curl -H "Authorization: Bearer $TOKEN" \
       "vehicle_number": "UP16XY9999",
       "vehicle_type": "unregistered",
       "vehicle_model": null,
+      "vehicle_model_source": null,
       "owner_name": null,
       "owner_name_source": null,
       "detected_at": "2026-08-04T09:00:00.000Z",
@@ -773,6 +898,12 @@ owner, so the registry is where the name actually lives. `owner_name_source` say
 (`event`, `registry`, or `null` when the plate is unknown to both). The registry lookup is one
 bounded query per page, not one per row, and it never crosses projects: the same plate can be Ravi
 at one site and a stranger at another.
+
+**`vehicle_model`** resolves the same way, with `vehicle_model_source` reporting which answered:
+what the camera inferred wins, and the model an operator typed on the registration fills the gap.
+Note that `?search=` matches the event's own values only — a plate whose model is known solely from
+the registry will not match on model here, because resolving the registry before filtering means a
+join on every query to serve a rare case. Search the registry itself via `GET /api/vehicles`.
 
 **`vehicle_type`** is the status as judged *when the vehicle was seen*, read from the event — so a
 registration expiring today cannot rewrite last week's rows.

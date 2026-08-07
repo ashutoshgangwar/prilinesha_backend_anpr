@@ -1,7 +1,30 @@
-const { body, query } = require('express-validator');
+const { body, param, query } = require('express-validator');
 
 const { VEHICLE_TYPES, REGISTRY_MAX_LIMIT } = require('../utils/constants');
 const { GROUP_ID_PATTERN, DEVICE_NAME_PATTERN } = require('./projectValidator');
+
+/**
+ * Make and model, as free text — "Swift Dzire", "Activa 6G".
+ *
+ * Deliberately not an enum: it is a note that helps an operator recognise the
+ * vehicle at the gate, nothing branches on it, and a fixed list of Indian
+ * models would be wrong within a week.
+ *
+ * Empty string and null both mean "no model", and are normalised to null so the
+ * stored value has one shape. On PATCH that is how you clear one.
+ *
+ * @param {Function} field `body` for a request field.
+ */
+const vehicleModelRule = (field) =>
+  field('vehicle_model')
+    .optional({ nullable: true })
+    .isString()
+    .withMessage('vehicle_model must be a string.')
+    .bail()
+    .trim()
+    .isLength({ max: 100 })
+    .withMessage('vehicle_model must be at most 100 characters.')
+    .customSanitizer((value) => value || null);
 
 const toInclusiveEndOfDay = (value) => {
   const isDateOnly = /^\d{4}-\d{2}-\d{2}$/.test(value);
@@ -67,6 +90,8 @@ const registerVehicleRules = [
       'phone_number must be 6-20 characters of digits, optionally prefixed with + and separated by spaces or hyphens.'
     ),
 
+  vehicleModelRule(body),
+
   body('valid_till')
     .exists({ checkNull: true })
     .withMessage('valid_till is required.')
@@ -100,6 +125,99 @@ const registerVehicleRules = [
     .withMessage('each device name must be 1-50 characters of letters, digits, dots, underscores or hyphens.'),
 ];
 
+const vehicleIdParamRule = param('id')
+  .isMongoId()
+  .withMessage('id must be a valid vehicle id.');
+
+/**
+ * PATCH rules. Every field is optional — only what is sent changes — but the
+ * service rejects a body that sends nothing at all, so a typo'd field name
+ * cannot look like a successful no-op edit.
+ *
+ * `group_id` and `vehicle_number` are absent on purpose: together they are the
+ * row's identity, and changing either is registering a different vehicle.
+ */
+const updateVehicleRules = [
+  vehicleIdParamRule,
+
+  body('name')
+    .optional()
+    .isString()
+    .withMessage('name must be a string.')
+    .bail()
+    .trim()
+    .notEmpty()
+    .withMessage('name cannot be empty.')
+    .isLength({ max: 150 })
+    .withMessage('name must be at most 150 characters.'),
+
+  body('phone_number')
+    .optional()
+    .isString()
+    .withMessage('phone_number must be a string.')
+    .bail()
+    .trim()
+    .matches(/^\+?[0-9][0-9\s-]{5,19}$/)
+    .withMessage(
+      'phone_number must be 6-20 characters of digits, optionally prefixed with + and separated by spaces or hyphens.'
+    ),
+
+  vehicleModelRule(body),
+
+  body('valid_till')
+    .optional()
+    .isString()
+    .withMessage('valid_till must be a date (YYYY-MM-DD) or an ISO 8601 datetime.')
+    .bail()
+    .trim()
+    .isISO8601()
+    .withMessage('valid_till must be a valid date (e.g. 2026-12-31) or ISO 8601 datetime.')
+    .bail()
+    .customSanitizer(toInclusiveEndOfDay)
+    .custom((value) => {
+      if (Number.isNaN(value.getTime())) throw new Error('valid_till is not a parsable date.');
+      return true;
+    }),
+
+  // An explicit `[]` widens a gate-restricted registration back to every gate,
+  // so this is `optional()` without checkFalsy — an empty array is a real edit.
+  body('device_names')
+    .optional({ nullable: true })
+    .isArray({ max: 100 })
+    .withMessage('device_names must be an array of at most 100 device names.'),
+
+  body('device_names.*')
+    .isString()
+    .withMessage('each device name must be a string.')
+    .bail()
+    .trim()
+    .matches(DEVICE_NAME_PATTERN)
+    .withMessage('each device name must be 1-50 characters of letters, digits, dots, underscores or hyphens.'),
+
+  body('is_active')
+    .optional()
+    .isBoolean()
+    .withMessage('is_active must be a boolean.')
+    .bail()
+    .toBoolean(),
+];
+
+/** The dedicated activate/deactivate switch, where is_active is the whole point. */
+const setVehicleStatusRules = [
+  vehicleIdParamRule,
+
+  body('is_active')
+    .exists({ checkNull: true })
+    .withMessage('is_active is required.')
+    .bail()
+    .isBoolean()
+    .withMessage('is_active must be a boolean.')
+    .bail()
+    .toBoolean(),
+];
+
+const vehicleIdParamRules = [vehicleIdParamRule];
+
 const listVehiclesRules = [
   query('group_id')
     .optional({ nullable: true, checkFalsy: true })
@@ -130,6 +248,20 @@ const listVehiclesRules = [
     .isIn(VEHICLE_TYPES)
     .withMessage(`status must be one of: ${VEHICLE_TYPES.join(', ')}.`),
 
+  // The manual switch on its own, which `status` cannot express — it folds
+  // expiry in, so `status=unregistered` cannot answer "which have we suspended?"
+  query('is_active')
+    .optional({ nullable: true, checkFalsy: false })
+    .isBoolean()
+    .withMessage('is_active must be true or false.')
+    .bail()
+    .toBoolean(),
+
+  query('registered_by')
+    .optional({ nullable: true, checkFalsy: true })
+    .isMongoId()
+    .withMessage('registered_by must be a valid user id.'),
+
   query('page')
     .optional({ nullable: true, checkFalsy: true })
     .isInt({ min: 1 })
@@ -143,4 +275,10 @@ const listVehiclesRules = [
     .toInt(),
 ];
 
-module.exports = { registerVehicleRules, listVehiclesRules };
+module.exports = {
+  registerVehicleRules,
+  listVehiclesRules,
+  updateVehicleRules,
+  setVehicleStatusRules,
+  vehicleIdParamRules,
+};

@@ -560,6 +560,76 @@ const authSchemas = ({ ROLE_VALUES, PERMISSIONS, LIST_MAX_LIMIT }) => ({
     },
   },
 
+  // ---------------------------------------------------------------- vehicles
+  UpdateVehicleRequest: {
+    type: 'object',
+    description:
+      'Only the fields sent are changed. `group_id` and `vehicle_number` are deliberately absent: ' +
+      'together they are the row’s identity and its unique index, so changing either is ' +
+      'registering a different vehicle — use `POST /api/vehicles`.',
+    properties: {
+      name: { type: 'string', maxLength: 150, example: 'Ravi K Sharma' },
+      phone_number: { type: 'string', example: '+91 9876543210' },
+      vehicle_model: {
+        type: 'string',
+        nullable: true,
+        maxLength: 100,
+        description: 'Send `null` or `""` to clear it.',
+        example: 'Swift Dzire',
+      },
+      valid_till: {
+        type: 'string',
+        description: 'A bare date is stored as 23:59:59.999 UTC, so the whole day counts.',
+        example: '2027-12-31',
+      },
+      device_names: {
+        type: 'array',
+        items: { type: 'string' },
+        description:
+          'Gates this registration is good for. Send an explicit `[]` to widen a restricted ' +
+          'registration back to every gate; omit the field to leave the list alone.',
+        example: ['entry1'],
+      },
+      is_active: {
+        type: 'boolean',
+        description:
+          'The manual switch. Also settable on its own via `PATCH /api/vehicles/{id}/status`, ' +
+          'which is the endpoint to use when toggling is the whole intent.',
+      },
+    },
+  },
+
+  SetVehicleStatusRequest: {
+    type: 'object',
+    required: ['is_active'],
+    properties: {
+      is_active: {
+        type: 'boolean',
+        description:
+          '`false` marks the vehicle **unregistered** at every gate immediately, whatever its ' +
+          '`valid_till` says. `true` restores it. Live on Intozi’s next poll.',
+        example: false,
+      },
+    },
+  },
+
+  VehicleDeleted: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean', example: true },
+      message: { type: 'string', example: 'Vehicle registration deleted.' },
+      data: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          group_id: { type: 'string', example: 'ACME_MALL' },
+          vehicle_number: { type: 'string', example: 'HR26DK8337' },
+        },
+      },
+      requestId: { type: 'string', format: 'uuid' },
+    },
+  },
+
   // -------------------------------------------------------------------- logs
   VehicleLogRecord: {
     type: 'object',
@@ -585,7 +655,14 @@ const authSchemas = ({ ROLE_VALUES, PERMISSIONS, LIST_MAX_LIMIT }) => ({
           'expiring today cannot rewrite last week’s detections.',
         example: 'registered',
       },
-      vehicle_model: { type: 'string', nullable: true, example: 'Swift Dzire' },
+      vehicle_model: {
+        type: 'string',
+        nullable: true,
+        description:
+          'From the event when the camera reported one, otherwise the model an operator entered ' +
+          'on the registration, matched on (group_id, vehicle_number). Null when neither has one.',
+        example: 'Swift Dzire',
+      },
       owner_name: {
         type: 'string',
         nullable: true,
@@ -599,6 +676,13 @@ const authSchemas = ({ ROLE_VALUES, PERMISSIONS, LIST_MAX_LIMIT }) => ({
         nullable: true,
         enum: ['event', 'registry', null],
         description: 'Which source answered, so the UI can tell a match from a camera-supplied name.',
+        example: 'registry',
+      },
+      vehicle_model_source: {
+        type: 'string',
+        nullable: true,
+        enum: ['event', 'registry', null],
+        description: 'Which source supplied the model, on the same rule as owner_name_source.',
         example: 'registry',
       },
       detected_at: {
