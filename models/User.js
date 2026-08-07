@@ -16,6 +16,47 @@ const { ROLE_VALUES, DEFAULT_ROLE, ROLES } = require('../utils/constants');
  *                 group_id there. Signing up therefore grants an account, not
  *                 access — the assignment is the access grant.
  */
+/**
+ * One live refresh token — in practice, one signed-in device.
+ *
+ * Only the SHA-256 of the token is kept, so this list is useless to anyone who
+ * reads the collection. Its presence is what makes a refresh token revocable:
+ * the token itself is a stateless JWT, so "is this session still allowed?" can
+ * only be answered by something the server stores.
+ */
+const refreshSessionSchema = new mongoose.Schema(
+  {
+    // The token this session will currently accept.
+    token_hash: { type: String, required: true },
+
+    // The one it accepted before the last rotation. Kept for exactly one
+    // generation as a tripwire: refreshing replaces the current hash, so the
+    // only way to present the previous one is to have kept a copy of a token
+    // the legitimate client already spent. See refresh() in authService.
+    //
+    // A session that was deliberately revoked is *deleted*, not kept here — so
+    // logging out, or being dropped by the session cap, does not look like
+    // theft, which is a distinction the user notices when it is missing.
+    previous_token_hash: { type: String, default: null },
+
+    issued_at: { type: Date, default: Date.now },
+
+    // Bumped on every rotation. The session cap evicts by this rather than by
+    // issued_at, so it is the least recently used device that gets dropped, not
+    // the one that happens to have logged in first.
+    last_used_at: { type: Date, default: Date.now },
+
+    expires_at: { type: Date, required: true },
+
+    // Context for a future "your active sessions" screen, and for making sense
+    // of a reuse alert after the fact. Never used to authorise anything —
+    // a user agent is attacker-controlled.
+    user_agent: { type: String, default: null, maxlength: 300 },
+    ip: { type: String, default: null },
+  },
+  { _id: false }
+);
+
 const userSchema = new mongoose.Schema(
   {
     name: { type: String, required: true, trim: true },
@@ -56,6 +97,12 @@ const userSchema = new mongoose.Schema(
     // currentSecond() in utils/jwt.js.
     tokens_valid_from: { type: Date, default: currentSecond },
 
+    // Live refresh tokens. `select: false` keeps this off every ordinary query
+    // — it is only ever needed by the auth service, which asks for it by name.
+    // Anything that writes to it MUST have selected it first, or saving would
+    // persist a fresh array over the sessions already there.
+    refresh_sessions: { type: [refreshSessionSchema], default: [], select: false },
+
     created_by: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
   },
   {
@@ -66,6 +113,9 @@ const userSchema = new mongoose.Schema(
         ret.id = ret._id;
         delete ret._id;
         delete ret.password_hash;
+        // Belt and braces: `select: false` already hides these, but a caller
+        // that asked for them explicitly must not serialise them by accident.
+        delete ret.refresh_sessions;
         return ret;
       },
     },

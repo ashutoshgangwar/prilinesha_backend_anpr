@@ -99,6 +99,51 @@ const loginRules = [
     .withMessage('password cannot be empty.'),
 ];
 
+/**
+ * A JWT is base64url text with two dots. Checking the shape here turns a
+ * mangled or truncated token into a 400 that names the field, rather than a
+ * bare 401 that a client cannot tell apart from an expired session.
+ */
+const refreshTokenRule = (field = 'refresh_token') =>
+  body(field)
+    .isString()
+    .withMessage('refresh_token must be a string.')
+    .bail()
+    .trim()
+    .notEmpty()
+    .withMessage('refresh_token cannot be empty.')
+    .bail()
+    .isLength({ max: 4096 })
+    .withMessage('refresh_token is not a valid token.')
+    .bail()
+    .matches(/^[\w-]+\.[\w-]+\.[\w-]+$/)
+    .withMessage('refresh_token is not a valid token.');
+
+const refreshRules = [
+  body('refresh_token').exists({ checkNull: true }).withMessage('refresh_token is required.').bail(),
+  refreshTokenRule(),
+];
+
+const logoutRules = [
+  // Declared first so the sanitiser has run by the time the rule below reads it.
+  body('all')
+    .optional()
+    .isBoolean()
+    .withMessage('all must be a boolean.')
+    .bail()
+    .toBoolean(),
+
+  // Signing out one device needs to know which one. Signing out everywhere does
+  // not, so `all: true` excuses the token — otherwise a user whose phone was
+  // stolen could not revoke it from the laptop they still have.
+  body('refresh_token')
+    .if((_value, { req }) => req.body?.all !== true)
+    .exists({ checkNull: true })
+    .withMessage('refresh_token is required, unless you send all: true to sign out everywhere.'),
+
+  refreshTokenRule().optional(),
+];
+
 const changePasswordRules = [
   body('current_password')
     .exists({ checkNull: true })
@@ -124,6 +169,8 @@ const changePasswordRules = [
 module.exports = {
   signupRules,
   loginRules,
+  refreshRules,
+  logoutRules,
   changePasswordRules,
   passwordRules,
   emailRule,

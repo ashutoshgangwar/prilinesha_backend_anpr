@@ -38,6 +38,37 @@ const authSchemas = ({ ROLE_VALUES, PERMISSIONS, LIST_MAX_LIMIT }) => ({
     },
   },
 
+  RefreshRequest: {
+    type: 'object',
+    required: ['refresh_token'],
+    properties: {
+      refresh_token: {
+        type: 'string',
+        description: 'The refresh token from the last login or refresh. Single-use.',
+        example: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9…',
+      },
+    },
+  },
+
+  LogoutRequest: {
+    type: 'object',
+    description: 'Send `refresh_token` to end this session, or `all: true` to end every session.',
+    properties: {
+      refresh_token: {
+        type: 'string',
+        description: 'Required unless `all` is true.',
+        example: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9…',
+      },
+      all: {
+        type: 'boolean',
+        default: false,
+        description:
+          'true also retires outstanding access tokens, so every device is signed out at once. ' +
+          'This is the option for a lost or stolen laptop.',
+      },
+    },
+  },
+
   ChangePasswordRequest: {
     type: 'object',
     required: ['current_password', 'new_password'],
@@ -100,20 +131,78 @@ const authSchemas = ({ ROLE_VALUES, PERMISSIONS, LIST_MAX_LIMIT }) => ({
     },
   },
 
+  /** The token pair, identical in shape wherever tokens are handed out. */
+  TokenPair: {
+    type: 'object',
+    properties: {
+      token: {
+        type: 'string',
+        description: 'Access token. Send as `Authorization: Bearer <token>` on every request.',
+        example: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9…',
+      },
+      token_type: { type: 'string', example: 'Bearer' },
+      expires_in: {
+        type: 'string',
+        description: 'Lifetime of the access token (JWT_EXPIRES_IN).',
+        example: '12h',
+      },
+      refresh_token: {
+        type: 'string',
+        description:
+          'Send to `POST /api/auth/refresh` to get a new pair once the access token expires. ' +
+          '**Single-use** — each refresh returns a new one and invalidates the old one, and ' +
+          'presenting a spent token revokes every session on the account. Store it where the ' +
+          'access token is not: an httpOnly cookie or the OS keychain, never localStorage.',
+        example: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9…',
+      },
+      refresh_expires_in: {
+        type: 'string',
+        description: 'Lifetime of the refresh token (JWT_REFRESH_EXPIRES_IN).',
+        example: '30d',
+      },
+    },
+  },
+
   AuthResponse: {
     type: 'object',
     properties: {
       success: { type: 'boolean', example: true },
       message: { type: 'string', example: 'Logged in successfully.' },
       data: {
+        allOf: [
+          { $ref: '#/components/schemas/TokenPair' },
+          {
+            type: 'object',
+            properties: { user: { $ref: '#/components/schemas/AuthUser' } },
+          },
+        ],
+      },
+      requestId: { type: 'string', format: 'uuid' },
+    },
+  },
+
+  LogoutResponse: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean', example: true },
+      message: { type: 'string', example: 'Signed out of every device.' },
+      data: {
         type: 'object',
         properties: {
-          user: { $ref: '#/components/schemas/AuthUser' },
-          token: { type: 'string', example: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9…' },
-          token_type: { type: 'string', example: 'Bearer' },
-          expires_in: { type: 'string', example: '12h' },
+          sessions_revoked: { type: 'integer', example: 1 },
+          scope: { type: 'string', enum: ['session', 'all'], example: 'session' },
         },
       },
+      requestId: { type: 'string', format: 'uuid' },
+    },
+  },
+
+  ChangePasswordResponse: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean', example: true },
+      message: { type: 'string', example: 'Password changed. Other sessions have been signed out.' },
+      data: { $ref: '#/components/schemas/TokenPair' },
       requestId: { type: 'string', format: 'uuid' },
     },
   },

@@ -74,8 +74,11 @@ const authPaths = {
   '/api/auth/login': {
     post: {
       tags: ['Auth'],
-      summary: 'Log in and receive an access token',
+      summary: 'Log in and receive an access + refresh token pair',
       description:
+        'The same endpoint for both roles — the role is never sent, it is looked up. What differs ' +
+        'is the response: a super admin gets `"group_ids": "ALL"` and every permission, a customer ' +
+        'admin gets their assigned `group_ids` and a shorter permission list.\n\n' +
         'A wrong email and a wrong password return the identical 401, and take comparable time, ' +
         'so the endpoint cannot be used to discover which addresses are registered.',
       requestBody: { required: true, content: json('#/components/schemas/LoginRequest') },
@@ -85,6 +88,56 @@ const authPaths = {
         401: { description: 'Invalid email or password', content: json('#/components/schemas/ErrorResponse') },
         403: { description: 'Account deactivated', content: json('#/components/schemas/ErrorResponse') },
         429: errors[429],
+        500: errors[500],
+      },
+    },
+  },
+
+  '/api/auth/refresh': {
+    post: {
+      tags: ['Auth'],
+      summary: 'Exchange a refresh token for a new pair',
+      description:
+        'Takes no `Authorization` header — the refresh token in the body **is** the credential, ' +
+        'which is what lets it work after the access token has expired.\n\n' +
+        '**Rotating and single-use.** Every call returns a new refresh token and kills the one ' +
+        'presented. Presenting a token that was already spent means two parties hold it, so the ' +
+        'server assumes theft and revokes *every* session on the account — both parties must then ' +
+        'log in with the password.\n\n' +
+        'Also rejects tokens that predate a password change, role change or deactivation, and ' +
+        'returns the refreshed `user` so a dashboard resuming a session need not also call ' +
+        '`/api/auth/me`.',
+      requestBody: { required: true, content: json('#/components/schemas/RefreshRequest') },
+      responses: {
+        200: { description: 'New token pair', content: json('#/components/schemas/AuthResponse') },
+        400: errors[400],
+        401: {
+          description: 'Invalid, expired, revoked or already-used refresh token',
+          content: json('#/components/schemas/ErrorResponse'),
+        },
+        429: errors[429],
+        500: errors[500],
+      },
+    },
+  },
+
+  '/api/auth/logout': {
+    post: {
+      tags: ['Auth'],
+      summary: 'Revoke a refresh token',
+      description:
+        'Send `refresh_token` to end that one session; send `all: true` to end every session on ' +
+        'the account.\n\n' +
+        'Ending one session does **not** invalidate its access token — access tokens are stateless ' +
+        'and simply expire, which is the cost of not hitting the database on every request. ' +
+        '`all: true` does retire them, so that is the option for a lost device.\n\n' +
+        'Revoking an already-revoked token is not an error; it reports `sessions_revoked: 0`.',
+      security: [{ BearerAuth: [] }],
+      requestBody: { required: true, content: json('#/components/schemas/LogoutRequest') },
+      responses: {
+        200: { description: 'Signed out', content: json('#/components/schemas/LogoutResponse') },
+        400: errors[400],
+        401: errors[401],
         500: errors[500],
       },
     },
@@ -111,12 +164,16 @@ const authPaths = {
       tags: ['Auth'],
       summary: 'Change your own password',
       description:
-        'Retires every token issued before now — including one an attacker may already hold — and ' +
-        'returns a fresh token so the current session is not signed out.',
+        'Retires every access token issued before now and drops every refresh session — including ' +
+        'any an attacker may already hold — then returns a fresh pair so the current session is ' +
+        'not signed out. Every other device has to log in again.',
       security: [{ BearerAuth: [] }],
       requestBody: { required: true, content: json('#/components/schemas/ChangePasswordRequest') },
       responses: {
-        200: { description: 'Password changed; use the returned token from now on' },
+        200: {
+          description: 'Password changed; use the returned tokens from now on',
+          content: json('#/components/schemas/ChangePasswordResponse'),
+        },
         400: errors[400],
         401: { description: 'Current password is incorrect', content: json('#/components/schemas/ErrorResponse') },
         500: errors[500],

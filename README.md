@@ -94,10 +94,13 @@ Safe to re-run: it only touches documents that have no `group_id`.
 | `JWT_SECRET` | **yes** | — | Signs dashboard tokens; min 32 chars. Changing it logs everyone out. |
 | `JWT_EXPIRES_IN` | no | `12h` | Access-token lifetime |
 | `JWT_ISSUER` | no | `prilinesha-anpr` | `iss` claim, verified on every token |
+| `JWT_REFRESH_SECRET` | no | derived from `JWT_SECRET` | Signs refresh tokens. Set explicitly (≥32 chars, different from `JWT_SECRET`) to rotate the two apart. |
+| `JWT_REFRESH_EXPIRES_IN` | no | `30d` | Refresh-token lifetime |
+| `MAX_ACTIVE_SESSIONS` | no | `5` | Concurrent refresh tokens (≈ devices) per account; the least recently used is dropped past the cap |
 | `BCRYPT_ROUNDS` | no | `12` | Password hashing cost (10–15) |
 | `SIGNUP_ENABLED` | no | `true` | Allow `POST /api/auth/signup`. Set `false` once all accounts exist. |
-| `AUTH_RATE_LIMIT_WINDOW_MS` | no | `900000` | Login/signup rate-limit window (15 min) |
-| `AUTH_RATE_LIMIT_MAX` | no | `10` | Failed login/signup attempts per window per IP |
+| `AUTH_RATE_LIMIT_WINDOW_MS` | no | `900000` | Login/signup/refresh rate-limit window (15 min) |
+| `AUTH_RATE_LIMIT_MAX` | no | `10` | Failed login/signup/refresh attempts per window per IP |
 | `SUPER_ADMIN_EMAIL` | no | — | Seeds the first super admin, only when none exists |
 | `SUPER_ADMIN_PASSWORD` | no | — | Required together with the email; min 8 chars |
 | `SUPER_ADMIN_NAME` | no | `Super Admin` | Display name for the seeded account |
@@ -202,6 +205,8 @@ A plate is **registered** only while a registration *in that project* covers it.
 | --- | --- | --- |
 | `POST /api/auth/signup` | — | anyone (creates an `admin` with no access) |
 | `POST /api/auth/login` | — | any user |
+| `POST /api/auth/refresh` | refresh token in body | any user |
+| `POST /api/auth/logout` | Bearer JWT | any user |
 | `GET /api/auth/me` | Bearer JWT | any user |
 | `POST /api/auth/change-password` | Bearer JWT | any user |
 | `POST /api/projects` | Bearer JWT | super admin |
@@ -255,17 +260,57 @@ straight away but sees nothing until a super admin assigns them a project.
     },
     "token": "eyJhbGciOiJIUzI1NiIs…",
     "token_type": "Bearer",
-    "expires_in": "12h"
+    "expires_in": "12h",
+    "refresh_token": "eyJhbGciOiJIUzI1NiIs…",
+    "refresh_expires_in": "30d"
   }
 }
 ```
 
-`group_ids` is the literal string `"ALL"` for a super admin, who is scoped to every project
-including ones created later. `permissions` lets the dashboard hide actions the role cannot perform
-— it is never the enforcement point, which is always server-side.
+One endpoint serves both roles — the role is never sent, it is looked up. What differs is the
+response: a super admin gets `"group_ids": "ALL"` (they are scoped to every project including ones
+created later) and all twelve permissions; a customer admin gets their assigned `group_ids` and
+five. `permissions` lets the dashboard hide actions the role cannot perform — it is never the
+enforcement point, which is always server-side.
 
 A wrong email and a wrong password return the identical `401`, and take comparable time, so the
 endpoint cannot be used to discover which addresses are registered.
+
+---
+
+### `POST /api/auth/refresh`
+
+No `Authorization` header — the refresh token in the body **is** the credential, which is what lets
+it work once the access token has expired.
+
+```json
+{ "refresh_token": "eyJhbGciOiJIUzI1NiIs…" }
+```
+
+`200` returns a new pair, plus the current `user` so a dashboard resuming a session need not also
+call `/api/auth/me` — the role, permissions and project list may have changed while it was closed.
+
+**Rotating and single-use.** Every call returns a new refresh token and retires the one presented.
+Presenting the generation that was just spent means two parties hold it, so the server assumes theft
+and revokes *every* session on the account — both must then come back through the password. A token
+that was revoked on purpose (logged out, dropped by `MAX_ACTIVE_SESSIONS`, cleared by a password
+change) is simply refused and other devices are left alone.
+
+`401` also covers tokens that predate a password change, a role change or a deactivation.
+
+---
+
+### `POST /api/auth/logout`
+
+```json
+{ "refresh_token": "eyJhbGciOiJIUzI1NiIs…" }   // this device
+{ "all": true }                                 // every device
+```
+
+Ending one session does **not** invalidate its access token — access tokens are stateless and simply
+expire, which is the cost of not hitting the database on every request. `all: true` bumps
+`tokens_valid_from` and so retires them too; that is the option for a lost laptop. Revoking an
+already-revoked token is not an error, it reports `sessions_revoked: 0`.
 
 ---
 

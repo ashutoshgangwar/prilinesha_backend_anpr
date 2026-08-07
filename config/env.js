@@ -1,6 +1,7 @@
 require('dotenv').config();
 
 const path = require('path');
+const crypto = require('crypto');
 
 /**
  * Environment validation + coercion.
@@ -77,6 +78,21 @@ const config = {
   JWT_EXPIRES_IN: optional('JWT_EXPIRES_IN', '12h'),
   JWT_ISSUER: optional('JWT_ISSUER', 'prilinesha-anpr'),
 
+  // Refresh tokens are signed with their own key, so a leaked access token can
+  // never be replayed as a refresh token (or the reverse) no matter what its
+  // claims say. Left empty it is derived from JWT_SECRET below — existing
+  // deployments keep booting, and the two token kinds still have separate keys.
+  JWT_REFRESH_SECRET: optional('JWT_REFRESH_SECRET', ''),
+
+  // Long, because it is the thing that keeps a user logged in for weeks while
+  // the access token stays short-lived enough to be worth little if stolen.
+  JWT_REFRESH_EXPIRES_IN: optional('JWT_REFRESH_EXPIRES_IN', '30d'),
+
+  // Concurrent refresh tokens (≈ devices) one account may hold. The oldest is
+  // dropped when the cap is reached, so an old phone signs itself out rather
+  // than the list growing without bound.
+  MAX_ACTIVE_SESSIONS: asInt('MAX_ACTIVE_SESSIONS', 5, { min: 1, max: 50 }),
+
   // Work factor for password hashing. 12 is ~250ms on modern hardware — high
   // enough to make offline cracking expensive, low enough for a login endpoint.
   BCRYPT_ROUNDS: asInt('BCRYPT_ROUNDS', 12, { min: 10, max: 15 }),
@@ -136,6 +152,30 @@ if (config.JWT_SECRET && config.JWT_SECRET.length < 32) {
 
 if (config.IS_PRODUCTION && /change-me|replace-with|placeholder/i.test(config.JWT_SECRET || '')) {
   errors.push('JWT_SECRET still holds a placeholder value; generate a real secret before deploying');
+}
+
+// Only checked when it was set explicitly — the derived fallback below is a
+// 64-character digest and cannot fail either test.
+if (config.JWT_REFRESH_SECRET) {
+  if (config.JWT_REFRESH_SECRET.length < 32) {
+    errors.push('JWT_REFRESH_SECRET must be at least 32 characters');
+  }
+  if (config.JWT_REFRESH_SECRET === config.JWT_SECRET) {
+    errors.push(
+      'JWT_REFRESH_SECRET must differ from JWT_SECRET — sharing one key lets an access token be ' +
+        'replayed as a refresh token'
+    );
+  }
+}
+
+// Derived rather than required, so adding refresh tokens does not break an
+// existing .env. Domain-separated from JWT_SECRET by the label, so knowing one
+// key does not hand over the other.
+if (!config.JWT_REFRESH_SECRET) {
+  config.JWT_REFRESH_SECRET = crypto
+    .createHmac('sha256', config.JWT_SECRET || '')
+    .update('prilinesha-anpr:refresh-token:v1')
+    .digest('hex');
 }
 
 // A half-configured bootstrap silently creates no super admin, which looks like
