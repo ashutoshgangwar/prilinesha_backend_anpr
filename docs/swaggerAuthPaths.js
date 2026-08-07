@@ -80,13 +80,20 @@ const authPaths = {
         'is the response: a super admin gets `"group_ids": "ALL"` and every permission, a customer ' +
         'admin gets their assigned `group_ids` and a shorter permission list.\n\n' +
         'A wrong email and a wrong password return the identical 401, and take comparable time, ' +
-        'so the endpoint cannot be used to discover which addresses are registered.',
+        'so the endpoint cannot be used to discover which addresses are registered.\n\n' +
+        'Two things can turn a correct password into a 403: the account itself being deactivated, ' +
+        'or **every project assigned to it being deactivated**. A customer admin whose projects ' +
+        'are all switched off cannot sign in. An account with no projects yet — a fresh signup — ' +
+        'still can; it simply has nothing to show. Super admins are never affected.',
       requestBody: { required: true, content: json('#/components/schemas/LoginRequest') },
       responses: {
         200: { description: 'Logged in', content: json('#/components/schemas/AuthResponse') },
         400: errors[400],
         401: { description: 'Invalid email or password', content: json('#/components/schemas/ErrorResponse') },
-        403: { description: 'Account deactivated', content: json('#/components/schemas/ErrorResponse') },
+        403: {
+          description: 'Account deactivated, or every assigned project is deactivated',
+          content: json('#/components/schemas/ErrorResponse'),
+        },
         429: errors[429],
         500: errors[500],
       },
@@ -191,8 +198,16 @@ const projectPaths = {
       description:
         '**Super admin only.** Returns the plaintext `api_key` exactly once — only its SHA-256 is ' +
         'stored, so a lost key must be rotated, not recovered.\n\n' +
-        'The `group_id` chosen here is what the customer configures in Intozi and what arrives on ' +
-        'every event. It cannot be changed afterwards.',
+        'The `group_id` chosen here is the project\'s name as well as its identifier: it is what ' +
+        'the customer configures in Intozi and what arrives on every event. It cannot be changed ' +
+        'afterwards.\n\n' +
+        'At least one gate is required in `devices`, and a project holds at most 50. Device names ' +
+        'may contain spaces, because that is how the cameras are labelled on site — ' +
+        '`"Netru Pro Entry"`, `"Netru Pro Exit"`.\n\n' +
+        'Set `create_login: true` to issue the customer their dashboard account in the same call, ' +
+        'with `contact_email` as the username. Send a `password` or omit it and one is generated ' +
+        'and returned once. If that address already has an account, it is left untouched and the ' +
+        'project is added to it — see `data.login.already_existed`.',
       security: [{ BearerAuth: [] }],
       requestBody: { required: true, content: json('#/components/schemas/CreateProjectRequest') },
       responses: {
@@ -208,14 +223,18 @@ const projectPaths = {
       tags: ['Projects'],
       summary: 'List projects',
       description:
-        'A super admin sees every project; a customer admin sees only the ones assigned to them.',
+        '**Super admin only.** Who the tenants are is internal information, so a customer admin ' +
+        'cannot read the project registry — they reach their own project through the endpoints ' +
+        'that name a `group_id` directly.',
       security: [{ BearerAuth: [] }],
       parameters: [
         {
           name: 'search',
           in: 'query',
           schema: { type: 'string', maxLength: 100 },
-          description: 'Partial, case-insensitive match on group_id, project name or customer name.',
+          description:
+            'Partial, case-insensitive match on group_id or customer name (and on the stored ' +
+            'name of projects created before it was unified with group_id).',
         },
         { name: 'is_active', in: 'query', schema: { type: 'boolean' } },
         ...pagingParams,
@@ -224,6 +243,7 @@ const projectPaths = {
         200: { description: 'Projects', content: json('#/components/schemas/ProjectList') },
         400: errors[400],
         401: errors[401],
+        403: errors[403],
         500: errors[500],
       },
     },
@@ -233,6 +253,7 @@ const projectPaths = {
     get: {
       tags: ['Projects'],
       summary: 'One project, its gates and live counts',
+      description: '**Super admin only.**',
       security: [{ BearerAuth: [] }],
       parameters: [groupIdParam],
       responses: {
@@ -248,13 +269,41 @@ const projectPaths = {
       summary: 'Update a project',
       description:
         '**Super admin only.** `group_id` is immutable — it is stamped on every event already ' +
-        'ingested and configured on the cameras themselves.',
+        'ingested and configured on the cameras themselves. Since it is also the project\'s name, ' +
+        'there is no name field to change; everything else here is descriptive.',
       security: [{ BearerAuth: [] }],
       parameters: [groupIdParam],
       requestBody: { required: true, content: json('#/components/schemas/UpdateProjectRequest') },
       responses: {
         200: { description: 'Updated', content: json('#/components/schemas/ProjectResponse') },
         400: errors[400],
+        401: errors[401],
+        403: errors[403],
+        404: errors[404],
+        500: errors[500],
+      },
+    },
+    delete: {
+      tags: ['Projects'],
+      summary: 'Deactivate a project',
+      description:
+        '**Super admin only. Nothing is removed.** This sets `is_active: false`: the project’s ' +
+        'cameras stop being able to post, its feed closes, and **the customer admins assigned to ' +
+        'it can no longer log in** — an admin whose every project is deactivated is refused at ' +
+        'login, at token refresh, and on their next authenticated request. Every event, ' +
+        'registered vehicle and user assignment is retained.\n\n' +
+        'It works this way because all of that data is keyed on `group_id`, not on the project ' +
+        'row — deleting the row would orphan it, and a `group_id` handed out again later would ' +
+        'inherit the orphans. The response reports what is being retained.\n\n' +
+        'Idempotent: deleting an already-inactive project is a 200. Reverse it with ' +
+        '`PATCH /api/projects/{group_id}` sending `{ "is_active": true }`.',
+      security: [{ BearerAuth: [] }],
+      parameters: [groupIdParam],
+      responses: {
+        200: {
+          description: 'Project deactivated (or already was)',
+          content: json('#/components/schemas/ProjectDeactivated'),
+        },
         401: errors[401],
         403: errors[403],
         404: errors[404],
@@ -287,8 +336,10 @@ const projectPaths = {
       tags: ['Projects'],
       summary: 'Add a gate to the project',
       description:
-        'Gates are the `device_name` values Intozi sends: entry1, exit1, exit2 and so on. Names are ' +
-        'unique within a project, case-insensitively.\n\n' +
+        'Gates are the `device_name` values Intozi sends — `Netru Pro Entry`, `Netru Pro Exit`, ' +
+        '`entry1`, `exit2`. Names are unique within a project, case-insensitively, and may contain ' +
+        'spaces (URL-encode them on the per-device routes). A project holds at most 50; adding a ' +
+        '51st is a 409.\n\n' +
         'A gate that was auto-registered by an incoming event is *completed* by this call rather ' +
         'than rejected as a duplicate.',
       security: [{ BearerAuth: [] }],
@@ -327,7 +378,9 @@ const projectPaths = {
       summary: 'Remove a gate',
       description:
         'Events already ingested from this gate are untouched — they record the device name as ' +
-        'sent, not a reference to this list.',
+        'sent, not a reference to this list.\n\n' +
+        'The project\'s last gate cannot be removed: add the replacement first, or deactivate the ' +
+        'project with `PATCH /api/projects/{group_id}`.',
       security: [{ BearerAuth: [] }],
       parameters: [groupIdParam, deviceNameParam],
       responses: {
@@ -335,6 +388,10 @@ const projectPaths = {
         401: errors[401],
         403: errors[403],
         404: errors[404],
+        409: {
+          description: 'It is the only device left',
+          content: json('#/components/schemas/ErrorResponse'),
+        },
         500: errors[500],
       },
     },

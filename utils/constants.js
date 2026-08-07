@@ -51,6 +51,21 @@ const LOG_MAX_LIMIT = 200;
  */
 const PROJECT_TYPES = ['parking', 'society'];
 
+/**
+ * How many gates a single project may have.
+ *
+ * A project with no devices cannot receive anything, so one is the floor and it
+ * is enforced on create and on removal — the last gate cannot be deleted.
+ *
+ * The ceiling is what keeps the project document small: it is loaded and
+ * re-saved on every ingested event, so the device list is on the hot path, not
+ * just in storage. Fifty is far above any real site and low enough that a
+ * misconfigured camera auto-registering junk names stops early. Raising it is
+ * safe; it is a policy number, not a structural one.
+ */
+const MIN_DEVICES_PER_PROJECT = 1;
+const MAX_DEVICES_PER_PROJECT = 50;
+
 // ---------------------------------------------------------------------------
 // Access control
 // ---------------------------------------------------------------------------
@@ -124,6 +139,33 @@ const ROLE_PERMISSIONS = {
 const roleHasPermission = (role, permission) =>
   Boolean(ROLE_PERMISSIONS[role]?.includes(permission));
 
+/**
+ * What role a customer's login gets, by the kind of site they run.
+ *
+ * Both site types land on `admin` today, so this map changes no behaviour. It
+ * exists because the rule is "a customer contact is an operator of their own
+ * site", not "everyone is an admin" — and stating it as a lookup means adding a
+ * third PROJECT_TYPE later forces a decision here instead of silently inheriting
+ * whatever the default happened to be.
+ *
+ * A `super_admin` is never produced by this path: that role is internal, and a
+ * public-ish field like project_type must not be able to reach it.
+ */
+const PROJECT_TYPE_ROLES = {
+  parking: ROLES.ADMIN,
+  society: ROLES.ADMIN,
+};
+
+/**
+ * @param {string} projectType One of PROJECT_TYPES.
+ * @returns {string} The role to store on the customer's user record.
+ */
+const roleForProjectType = (projectType) => {
+  const role = PROJECT_TYPE_ROLES[String(projectType ?? '').trim().toLowerCase()];
+  // An unrecognised type still yields a customer-level account, never more.
+  return role && role !== ROLES.SUPER_ADMIN ? role : ROLES.ADMIN;
+};
+
 /** How a request proved who it is — set by the auth middleware for logging. */
 const AUTH_SUBJECT = {
   USER: 'user', // dashboard user holding a JWT
@@ -160,12 +202,16 @@ module.exports = {
   LOG_DEFAULT_LIMIT,
   LOG_MAX_LIMIT,
   PROJECT_TYPES,
+  MIN_DEVICES_PER_PROJECT,
+  MAX_DEVICES_PER_PROJECT,
   ROLES,
   ROLE_VALUES,
   DEFAULT_ROLE,
   PERMISSIONS,
   ROLE_PERMISSIONS,
   roleHasPermission,
+  PROJECT_TYPE_ROLES,
+  roleForProjectType,
   AUTH_SUBJECT,
   PROJECT_API_KEY_PREFIX,
   IMAGE_KIND,

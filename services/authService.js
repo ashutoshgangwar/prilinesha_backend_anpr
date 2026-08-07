@@ -2,6 +2,7 @@ const bcrypt = require('bcryptjs');
 
 const User = require('../models/User');
 const Project = require('../models/Project');
+const { assertDashboardAccess } = require('./projectService');
 const config = require('../config/env');
 const AppError = require('../utils/AppError');
 const logger = require('../utils/logger');
@@ -267,6 +268,11 @@ const login = async (payload, { requestId, userAgent, ip } = {}) => {
     throw AppError.forbidden('This account has been deactivated. Contact your administrator.');
   }
 
+  // A live account is not enough — the customer's project has to be live too.
+  // Checked after the password, so this never becomes an oracle for which
+  // addresses are registered.
+  await assertDashboardAccess(user, { requestId });
+
   user.last_login_at = new Date();
 
   // issueTokens saves, so last_login_at rides along on the same write.
@@ -320,6 +326,10 @@ const refresh = async (payload, { requestId, userAgent, ip } = {}) => {
     log.warn('Refresh rejected: token predates the account cutoff', { userId: String(user._id) });
     throw AppError.unauthorized('Session expired. Please log in again.');
   }
+
+  // Same gate as login: a session cannot be renewed into a project that was
+  // switched off while it was running.
+  await assertDashboardAccess(user, { requestId });
 
   const presentedHash = hashRefreshToken(payload.refresh_token);
   const active = user.refresh_sessions.find((session) => session.token_hash === presentedHash);

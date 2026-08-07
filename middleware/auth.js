@@ -2,6 +2,7 @@ const User = require('../models/User');
 const AppError = require('../utils/AppError');
 const logger = require('../utils/logger');
 const { verifyAccessToken } = require('../utils/jwt');
+const { assertDashboardAccess } = require('../services/projectService');
 const { ROLES, AUTH_SUBJECT, roleHasPermission } = require('../utils/constants');
 
 /**
@@ -68,6 +69,12 @@ const authenticate = async (req, _res, next) => {
     if (user.tokens_valid_from && issuedAt < user.tokens_valid_from.getTime()) {
       return next(AppError.unauthorized('Session expired. Please log in again.'));
     }
+
+    // Deactivating a project has to land on the customer's next request, not
+    // whenever their access token expires — the same reasoning as re-reading the
+    // user above. One indexed count for a customer admin; a super admin and an
+    // unassigned account both return without querying.
+    await assertDashboardAccess(user, { requestId: req.id });
 
     req.user = user;
     req.authSubject = AUTH_SUBJECT.USER;

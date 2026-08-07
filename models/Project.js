@@ -12,6 +12,8 @@ const { PROJECT_TYPES } = require('../utils/constants');
  */
 const deviceSchema = new mongoose.Schema(
   {
+    // Spaces are allowed: the name is stored exactly as the camera reports it
+    // ("Netru Pro Exit"), not normalised into an identifier.
     device_name: { type: String, required: true, trim: true },
 
     // Free-text label for the dashboard ("Main gate — north side").
@@ -48,6 +50,9 @@ const projectSchema = new mongoose.Schema(
     // Uppercased so "acme_mall" and "ACME_MALL" can never become two tenants.
     group_id: { type: String, required: true, trim: true, uppercase: true },
 
+    // A mirror of `group_id`: a project has one name and that is it. The field
+    // survives because documents written before the two were unified carry a
+    // distinct name, and readers (the project switcher, for one) still ask for it.
     project_name: { type: String, required: true, trim: true },
     description: { type: String, trim: true, default: null },
 

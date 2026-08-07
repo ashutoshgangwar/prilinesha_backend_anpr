@@ -1,6 +1,13 @@
 const { body, param, query } = require('express-validator');
 
-const { LIST_MAX_LIMIT, PROJECT_TYPES } = require('../utils/constants');
+const { passwordRules } = require('./authValidator');
+
+const {
+  LIST_MAX_LIMIT,
+  PROJECT_TYPES,
+  MIN_DEVICES_PER_PROJECT,
+  MAX_DEVICES_PER_PROJECT,
+} = require('../utils/constants');
 
 /**
  * Validation rules for the project (group_id) endpoints.
@@ -12,15 +19,20 @@ const { LIST_MAX_LIMIT, PROJECT_TYPES } = require('../utils/constants');
  */
 
 const GROUP_ID_PATTERN = /^[A-Z0-9][A-Z0-9_-]{1,49}$/;
-const DEVICE_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,49}$/;
+
+// Spaces are allowed because that is how the cameras are actually labelled on
+// site — Intozi posts "Netru Pro Entry", not "netru_pro_entry". The name still
+// travels in a URL path on the per-device routes, so callers encode it there.
+const DEVICE_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9 _.-]{0,49}$/;
 const DEVICE_DIRECTIONS = ['entry', 'exit', 'both'];
 
-// On create only: the super admin's form asks for a name, an address and a
-// type, so the Intozi identifier is derived from the name when it is left out
-// (see deriveGroupId in services/projectService.js). Sending one explicitly
-// still wins, for a customer who has already configured their cameras.
-const optionalGroupIdBodyRule = body('group_id')
-  .optional({ nullable: true, checkFalsy: true })
+// `group_id` is the project's only name: there is no separate project_name to
+// derive it from, so the super admin states it outright and it is what the
+// dashboard, the cameras and every stored event all refer to.
+const requiredGroupIdBodyRule = body('group_id')
+  .exists({ checkNull: true })
+  .withMessage('group_id is required.')
+  .bail()
   .isString()
   .withMessage('group_id must be a string.')
   .bail()
@@ -28,7 +40,7 @@ const optionalGroupIdBodyRule = body('group_id')
   .toUpperCase()
   .matches(GROUP_ID_PATTERN)
   .withMessage(
-    'group_id must be 2-50 characters of letters, digits, underscores or hyphens (e.g. ACME_MALL).'
+    'group_id must be 2-50 characters of letters, digits, underscores or hyphens (e.g. NETRU_PRO).'
   );
 
 const projectTypeRule = body('project_type')
@@ -74,7 +86,7 @@ const deviceNameRule = (location, field = 'device_name') =>
     .trim()
     .matches(DEVICE_NAME_PATTERN)
     .withMessage(
-      'device_name must be 1-50 characters of letters, digits, dots, underscores or hyphens (e.g. entry1, exit2).'
+      'device_name must be 1-50 characters of letters, digits, spaces, dots, underscores or hyphens (e.g. Netru Pro Entry, exit2).'
     );
 
 const optionalText = (field, max, label = field) =>
@@ -98,18 +110,7 @@ const directionRule = body('direction')
   .withMessage(`direction must be one of: ${DEVICE_DIRECTIONS.join(', ')}.`);
 
 const createProjectRules = [
-  optionalGroupIdBodyRule,
-
-  body('project_name')
-    .exists({ checkNull: true })
-    .withMessage('project_name is required.')
-    .bail()
-    .isString()
-    .withMessage('project_name must be a string.')
-    .bail()
-    .trim()
-    .isLength({ min: 2, max: 150 })
-    .withMessage('project_name must be between 2 and 150 characters.'),
+  requiredGroupIdBodyRule,
 
   addressRule,
   projectTypeRule,
@@ -126,11 +127,18 @@ const createProjectRules = [
     .trim()
     .normalizeEmail({ gmail_remove_dots: false }),
 
-  // Gates can be listed up front or added later — both are normal.
+  // At least one gate is required: a project with no devices cannot receive
+  // anything, so creating one is always a half-finished setup. On create a gate
+  // is only its name — `direction` is not accepted here, and is set later
+  // through the per-device routes if a report ever needs it.
   body('devices')
-    .optional({ nullable: true })
-    .isArray({ max: 200 })
-    .withMessage('devices must be an array of at most 200 entries.'),
+    .exists({ checkNull: true })
+    .withMessage('devices is required — a project needs at least one gate.')
+    .bail()
+    .isArray({ min: MIN_DEVICES_PER_PROJECT, max: MAX_DEVICES_PER_PROJECT })
+    .withMessage(
+      `devices must be an array of ${MIN_DEVICES_PER_PROJECT} to ${MAX_DEVICES_PER_PROJECT} entries.`
+    ),
 
   body('devices.*.device_name')
     .exists({ checkNull: true })
@@ -141,7 +149,9 @@ const createProjectRules = [
     .bail()
     .trim()
     .matches(DEVICE_NAME_PATTERN)
-    .withMessage('device_name must be 1-50 characters of letters, digits, dots, underscores or hyphens.'),
+    .withMessage(
+      'device_name must be 1-50 characters of letters, digits, spaces, dots, underscores or hyphens.'
+    ),
 
   body('devices.*.label')
     .optional({ nullable: true, checkFalsy: true })
@@ -152,14 +162,20 @@ const createProjectRules = [
     .isLength({ max: 150 })
     .withMessage('device label must be at most 150 characters.'),
 
-  body('devices.*.direction')
-    .optional({ nullable: true, checkFalsy: true })
-    .isString()
-    .bail()
-    .trim()
-    .toLowerCase()
-    .isIn(DEVICE_DIRECTIONS)
-    .withMessage(`device direction must be one of: ${DEVICE_DIRECTIONS.join(', ')}.`),
+  // Provision the customer's dashboard login in the same call. `contact_email`
+  // becomes their username, so it stops being optional once this is on — checked
+  // in the service, which is where the "is that address already an account?"
+  // question gets answered too.
+  body('create_login')
+    .optional({ nullable: true })
+    .isBoolean()
+    .withMessage('create_login must be true or false.')
+    .toBoolean(),
+
+  // Optional: omitted, one is generated and returned once. Reuses the single
+  // password policy rather than restating it — `.optional()` applies to the
+  // whole chain, so the `exists()` inside it is skipped when nothing is sent.
+  ...passwordRules('password').map((rule) => rule.optional({ nullable: true, checkFalsy: true })),
 
   // Rejects a duplicate gate name inside a single request, which the per-device
   // rules above cannot see.
@@ -177,17 +193,10 @@ const createProjectRules = [
   }),
 ];
 
+// `group_id` is absent on purpose: it is the project's identity, stamped on
+// every event already ingested and configured on the cameras themselves.
 const updateProjectRules = [
   groupIdParamRule,
-
-  body('project_name')
-    .optional({ nullable: true, checkFalsy: true })
-    .isString()
-    .withMessage('project_name must be a string.')
-    .bail()
-    .trim()
-    .isLength({ min: 2, max: 150 })
-    .withMessage('project_name must be between 2 and 150 characters.'),
 
   optionalText('address', 300),
 

@@ -15,19 +15,29 @@ const { buildScopeFilter, assertProjectAccess } = require('../middleware/auth');
  * Creates a project and issues its Intozi API key.
  */
 const createProject = asyncHandler(async (req, res) => {
-  const { project, api_key: apiKey } = await projectService.createProject(req.body, {
+  const { project, api_key: apiKey, login } = await projectService.createProject(req.body, {
     actor: req.user,
     requestId: req.id,
   });
 
+  // Two different secrets can be in this response, and both are shown once.
+  const warning = login?.password
+    ? 'Store the api_key and the login password now — both are shown once and cannot be retrieved later.'
+    : 'Store this api_key now — it is shown once and cannot be retrieved later.';
+
   res.status(201).json({
     success: true,
-    message: 'Project created successfully.',
+    message: login?.created
+      ? 'Project created and a dashboard login was issued for the customer.'
+      : 'Project created successfully.',
     // Said plainly, because there is no second chance to read it.
-    warning: 'Store this api_key now — it is shown once and cannot be retrieved later.',
+    warning,
     data: {
       project,
       api_key: apiKey,
+      // Null when no login was asked for, so the key is always present in the
+      // shape and a client can test it rather than probing for its absence.
+      login: login ?? null,
       intozi_setup: {
         group_id: project.group_id,
         post_url: '/api',
@@ -97,6 +107,32 @@ const updateProject = asyncHandler(async (req, res) => {
     success: true,
     message: 'Project updated successfully.',
     data: project,
+    requestId: req.id,
+  });
+});
+
+/**
+ * DELETE /api/projects/:group_id
+ *
+ * Deactivates rather than removes — see deactivateProject for why the document
+ * has to survive. The response says so plainly, so nobody reads a 200 here as
+ * "the customer's data is gone".
+ */
+const deleteProject = asyncHandler(async (req, res) => {
+  assertProjectAccess(req, req.params.group_id);
+
+  const { project, was_active: wasActive, retained } = await projectService.deactivateProject(
+    req.params.group_id,
+    { actor: req.user, requestId: req.id }
+  );
+
+  res.status(200).json({
+    success: true,
+    message: wasActive
+      ? 'Project deactivated. Its cameras can no longer post, its feed is closed, and its admins can no longer sign in.'
+      : 'Project was already inactive. Nothing changed.',
+    note: 'Nothing was deleted — the events, vehicles and user assignments below are retained. Re-enable with PATCH { "is_active": true }.',
+    data: { project, retained },
     requestId: req.id,
   });
 });
@@ -184,6 +220,7 @@ module.exports = {
   listProjects,
   getProject,
   updateProject,
+  deleteProject,
   rotateApiKey,
   addDevice,
   updateDevice,

@@ -224,8 +224,8 @@ const authSchemas = ({ ROLE_VALUES, PERMISSIONS, LIST_MAX_LIMIT }) => ({
       id: { type: 'string' },
       device_name: {
         type: 'string',
-        description: 'The gate identifier Intozi sends on every event.',
-        example: 'entry1',
+        description: 'The gate identifier Intozi sends on every event. May contain spaces.',
+        example: 'Netru Pro Entry',
       },
       label: { type: 'string', nullable: true, example: 'Main gate — north side' },
       direction: { type: 'string', enum: ['entry', 'exit', 'both'], nullable: true },
@@ -243,20 +243,17 @@ const authSchemas = ({ ROLE_VALUES, PERMISSIONS, LIST_MAX_LIMIT }) => ({
 
   CreateProjectRequest: {
     type: 'object',
-    required: ['project_name', 'address', 'project_type'],
+    required: ['group_id', 'address', 'project_type', 'devices'],
     properties: {
       group_id: {
         type: 'string',
         pattern: '^[A-Z0-9][A-Z0-9_-]{1,49}$',
         description:
-          'The tenant identifier the customer configures in Intozi. Uppercased on save. ' +
-          'Immutable once created — it is stamped on every event already ingested.\n\n' +
-          '**Optional.** Omit it and one is derived from `project_name` ' +
-          '("Acme Mall Parking" → `ACME_MALL_PARKING`), with `_2`, `_3`… appended on collision. ' +
-          'Send it explicitly only when the cameras are already configured for a given id.',
-        example: 'ACME_MALL',
+          'The project\'s name and its identifier — there is no separate `project_name`. This is ' +
+          'what the customer configures in Intozi and what arrives on every event. Uppercased on ' +
+          'save, and immutable once created, because it is stamped on all ingested history.',
+        example: 'NETRU_PRO',
       },
-      project_name: { type: 'string', minLength: 2, maxLength: 150, example: 'Acme Mall Parking' },
       address: {
         type: 'string',
         minLength: 5,
@@ -270,36 +267,85 @@ const authSchemas = ({ ROLE_VALUES, PERMISSIONS, LIST_MAX_LIMIT }) => ({
         description: 'What kind of site this is.',
         example: 'parking',
       },
-      description: { type: 'string', nullable: true },
-      customer_name: { type: 'string', nullable: true, example: 'Acme Retail Pvt Ltd' },
-      contact_email: { type: 'string', format: 'email', nullable: true },
-      contact_phone: { type: 'string', nullable: true },
+      description: { type: 'string', nullable: true, example: 'Two-gate parking, 24/7 operation.' },
+      customer_name: {
+        type: 'string',
+        nullable: true,
+        description: 'Also used as the name on the dashboard account when `create_login` is true.',
+        example: 'Netru Retail Pvt Ltd',
+      },
+      contact_email: {
+        type: 'string',
+        format: 'email',
+        nullable: true,
+        description:
+          'The customer’s contact address — and their **username**, when `create_login` is true. ' +
+          'Required in that case.',
+        example: 'ops@example.com',
+      },
+      contact_phone: { type: 'string', nullable: true, example: '+91 98765 43210' },
+      create_login: {
+        type: 'boolean',
+        default: false,
+        description:
+          'Issue the customer a dashboard login alongside the project — this performs a signup ' +
+          'on their behalf, writing the same `users` row `POST /api/auth/signup` would: ' +
+          '`contact_email` as the username, `contact_phone` as the phone number, `customer_name` ' +
+          'as the display name, and the password below (or a generated one) hashed with bcrypt. ' +
+          'The `role` is derived from `project_type` — a `parking` or `society` contact is that ' +
+          'site’s operator, so the account is an `admin`, scoped to this project alone.\n\n' +
+          '- **New address** → an `admin` account is created holding this project.\n' +
+          '- **Address already has an account** → that account is left untouched and this project ' +
+          'is *added* to it. Their password is not changed. Someone running two sites is one ' +
+          'person with one login.\n\n' +
+          'The outcome is reported in `data.login`, including which of the two happened.',
+        example: true,
+      },
+      password: {
+        type: 'string',
+        minLength: 8,
+        maxLength: 128,
+        description:
+          'Optional first password for the new account, subject to the usual policy (8–128 ' +
+          'characters, at least one letter and one number). **Omit it and one is generated** and ' +
+          'returned once in `data.login.password`. Ignored when the address already has an ' +
+          'account — an existing password is never overwritten here.',
+      },
       devices: {
         type: 'array',
-        description: 'Gates, addable now or later.',
+        minItems: 1,
+        maxItems: 50,
+        description:
+          '**Required — at least one gate.** A project with no devices cannot receive anything. ' +
+          'A project holds between 1 and 50 devices in total, and the same ceiling applies to ' +
+          '`POST /api/projects/{group_id}/devices` afterwards.\n\n' +
+          '`device_name` may contain spaces — the cameras are labelled the way they are labelled ' +
+          'on site.\n\n' +
+          '`direction` is **not** accepted here; a gate is only its name at create time. Set it ' +
+          'later with `PATCH /api/projects/{group_id}/devices/{device_name}` if a report needs it.',
         items: {
           type: 'object',
           required: ['device_name'],
           properties: {
-            device_name: { type: 'string', example: 'entry1' },
+            device_name: {
+              type: 'string',
+              pattern: '^[A-Za-z0-9][A-Za-z0-9 _.-]{0,49}$',
+              example: 'Netru Pro Entry',
+            },
             label: { type: 'string', nullable: true },
-            direction: { type: 'string', enum: ['entry', 'exit', 'both'], nullable: true },
           },
         },
-        example: [
-          { device_name: 'entry1', direction: 'entry' },
-          { device_name: 'exit1', direction: 'exit' },
-          { device_name: 'exit2', direction: 'exit' },
-        ],
+        example: [{ device_name: 'Netru Pro Entry' }, { device_name: 'Netru Pro Exit' }],
       },
     },
   },
 
   UpdateProjectRequest: {
     type: 'object',
-    description: '`group_id` is deliberately absent — it cannot be changed.',
+    description:
+      '`group_id` is deliberately absent — it cannot be changed, and it is also the project\'s ' +
+      'name, so there is no name field here either.',
     properties: {
-      project_name: { type: 'string', minLength: 2, maxLength: 150 },
       address: { type: 'string', maxLength: 300, nullable: true },
       project_type: { type: 'string', enum: ['parking', 'society'], nullable: true },
       description: { type: 'string', nullable: true },
@@ -309,8 +355,9 @@ const authSchemas = ({ ROLE_VALUES, PERMISSIONS, LIST_MAX_LIMIT }) => ({
       is_active: {
         type: 'boolean',
         description:
-          'false stops this project’s cameras from posting and its feed from being read, without ' +
-          'deleting anything.',
+          'false stops this project’s cameras from posting, closes its feed, and locks out the ' +
+          'customer admins assigned to it — without deleting anything. An admin is refused only ' +
+          'when *every* project on their account is inactive; a super admin is never affected.',
       },
     },
   },
@@ -319,8 +366,14 @@ const authSchemas = ({ ROLE_VALUES, PERMISSIONS, LIST_MAX_LIMIT }) => ({
     type: 'object',
     properties: {
       id: { type: 'string' },
-      group_id: { type: 'string', example: 'ACME_MALL' },
-      project_name: { type: 'string', example: 'Acme Mall Parking' },
+      group_id: { type: 'string', example: 'NETRU_PRO' },
+      project_name: {
+        type: 'string',
+        description:
+          'Mirrors `group_id`. Kept in the response for older clients; it may still differ on ' +
+          'projects created before the two were unified.',
+        example: 'NETRU_PRO',
+      },
       address: {
         type: 'string',
         nullable: true,
@@ -377,16 +430,85 @@ const authSchemas = ({ ROLE_VALUES, PERMISSIONS, LIST_MAX_LIMIT }) => ({
           api_key: {
             type: 'string',
             description: 'The Intozi credential. Shown ONCE — only its SHA-256 is stored.',
-            example: 'pk_ACMEMALL_9f2c1e8a4b7d0c3e6f5a2b9d8c7e4f1a0b3c6d9e2f5a8b1c',
+            example: 'pk_NETRUPRO_9f2c1e8a4b7d0c3e6f5a2b9d8c7e4f1a0b3c6d9e2f5a8b1c',
+          },
+          login: {
+            type: 'object',
+            nullable: true,
+            description:
+              'The customer’s dashboard account. `null` when `create_login` was not set. Check ' +
+              '`already_existed` to see whether this call created the account or attached the ' +
+              'project to one that was already there.',
+            properties: {
+              created: {
+                type: 'boolean',
+                description: 'true when a new account was made by this call.',
+                example: true,
+              },
+              already_existed: {
+                type: 'boolean',
+                description:
+                  'true when the address already had an account. It was left untouched and this ' +
+                  'project was added to it.',
+                example: false,
+              },
+              user_id: { type: 'string', example: '665f1b2c9d4e7a8b3c0f1d2e' },
+              email: {
+                type: 'string',
+                format: 'email',
+                description: 'The username. This is `contact_email`, stored on the user record.',
+                example: 'ops@example.com',
+              },
+              name: {
+                type: 'string',
+                description: 'From `customer_name`, falling back to the group_id.',
+                example: 'Netru Retail Pvt Ltd',
+              },
+              phone_number: {
+                type: 'string',
+                nullable: true,
+                description: 'From `contact_phone`.',
+                example: '+91 98765 43210',
+              },
+              role: {
+                type: 'string',
+                enum: ['admin', 'super_admin'],
+                description:
+                  'Derived from `project_type`: a `parking` or `society` contact is that site’s ' +
+                  'operator, so the account is an `admin`. This path never produces a super ' +
+                  'admin. On an existing account it reports the role already held.',
+                example: 'admin',
+              },
+              password: {
+                type: 'string',
+                description:
+                  'Present ONLY when this system generated it — shown once, never retrievable. ' +
+                  'Absent when you supplied the password (you already have it) and when the ' +
+                  'account already existed (untouched).',
+                example: 'Kq7dRm2xT9veAh4P',
+              },
+              password_set: {
+                type: 'string',
+                enum: ['generated', 'provided', 'unchanged'],
+                description: '`unchanged` means an existing account’s password was not touched.',
+                example: 'generated',
+              },
+              note: {
+                type: 'string',
+                example:
+                  'Store this password now — it is shown once and only its hash is kept. The ' +
+                  'customer should change it after signing in.',
+              },
+            },
           },
           intozi_setup: {
             type: 'object',
             description: 'The three values to hand the customer for their Intozi configuration.',
             properties: {
-              group_id: { type: 'string', example: 'ACME_MALL' },
+              group_id: { type: 'string', example: 'NETRU_PRO' },
               post_url: { type: 'string', example: '/api' },
               feed_url: { type: 'string', example: '/api/feed' },
-              authorization_header: { type: 'string', example: 'Bearer pk_ACMEMALL_9f2c…' },
+              authorization_header: { type: 'string', example: 'Bearer pk_NETRUPRO_9f2c…' },
             },
           },
         },
@@ -401,6 +523,40 @@ const authSchemas = ({ ROLE_VALUES, PERMISSIONS, LIST_MAX_LIMIT }) => ({
       success: { type: 'boolean', example: true },
       message: { type: 'string' },
       data: { $ref: '#/components/schemas/Project' },
+      requestId: { type: 'string', format: 'uuid' },
+    },
+  },
+
+  ProjectDeactivated: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean', example: true },
+      message: {
+        type: 'string',
+        example: 'Project deactivated. Its cameras can no longer post and its feed is closed.',
+      },
+      note: {
+        type: 'string',
+        description: 'Says outright that this was not a removal, so a 200 is not misread.',
+        example:
+          'Nothing was deleted — the events, vehicles and user assignments below are retained. ' +
+          'Re-enable with PATCH { "is_active": true }.',
+      },
+      data: {
+        type: 'object',
+        properties: {
+          project: { $ref: '#/components/schemas/Project' },
+          retained: {
+            type: 'object',
+            description: 'What the project still holds, none of it touched by this call.',
+            properties: {
+              registered_vehicles: { type: 'integer', example: 12 },
+              total_events: { type: 'integer', example: 48210 },
+              assigned_users: { type: 'integer', example: 3 },
+            },
+          },
+        },
+      },
       requestId: { type: 'string', format: 'uuid' },
     },
   },

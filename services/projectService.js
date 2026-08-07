@@ -5,7 +5,15 @@ const RegisteredVehicle = require('../models/RegisteredVehicle');
 const AppError = require('../utils/AppError');
 const logger = require('../utils/logger');
 const { generateProjectApiKey, hashApiKey, keyLast4 } = require('../utils/apiKeys');
-const { LIST_DEFAULT_LIMIT, LIST_MAX_LIMIT } = require('../utils/constants');
+const { generateInitialPassword } = require('../utils/passwords');
+const {
+  LIST_DEFAULT_LIMIT,
+  LIST_MAX_LIMIT,
+  MIN_DEVICES_PER_PROJECT,
+  MAX_DEVICES_PER_PROJECT,
+  ROLES,
+  roleForProjectType,
+} = require('../utils/constants');
 
 /**
  * Projects — the tenant registry.
@@ -14,71 +22,15 @@ const { LIST_DEFAULT_LIMIT, LIST_MAX_LIMIT } = require('../utils/constants');
  * `group_id` to put on every Intozi event, and the API key to authenticate with.
  * Everything downstream (devices, registered vehicles, the polling feed, which
  * dashboard user sees what) hangs off that one identifier.
+ *
+ * A project has no name separate from its `group_id`. There used to be one, and
+ * it only ever created the question of which of the two a screen should show;
+ * the identifier the cameras are configured with is the answer in every case.
+ * `project_name` is still written to the document, mirroring `group_id`, so the
+ * field stays populated for rows and readers that predate this.
  */
 
 const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
-/**
- * Turns a project name into a candidate group_id: "Acme Mall, Phase 2" becomes
- * "ACME_MALL_PHASE_2". Anything outside the identifier's character set collapses
- * to a single underscore, because the result has to be typed by hand into an
- * Intozi configuration.
- *
- * @param {string} projectName
- * @returns {string} Possibly empty, if the name was all punctuation.
- */
-const slugifyGroupId = (projectName) =>
-  String(projectName ?? '')
-    .trim()
-    .toUpperCase()
-    .replace(/[^A-Z0-9]+/g, '_')
-    .replace(/^_+|_+$/g, '')
-    .slice(0, 50)
-    .replace(/_+$/, '');
-
-/**
- * Picks a free group_id derived from the project name.
- *
- * The super admin's form asks for a name, an address and a type — not for an
- * identifier — so one is derived here. A collision appends _2, _3, … rather than
- * failing, since two customers may legitimately both be called "City Parking".
- *
- * @param {string} projectName
- * @returns {Promise<string>}
- * @throws {AppError} 400 when the name yields no usable identifier.
- */
-const deriveGroupId = async (projectName) => {
-  const base = slugifyGroupId(projectName);
-
-  if (base.length < 2) {
-    throw AppError.badRequest(
-      'Could not derive a group_id from that project_name. Send an explicit group_id.',
-      [{ field: 'group_id', message: 'group_id is required for this project_name.' }]
-    );
-  }
-
-  // One query rather than a probe per attempt: everything already taken that
-  // starts with this base, so the suffix can be chosen in memory.
-  const taken = new Set(
-    (
-      await Project.find({ group_id: new RegExp(`^${escapeRegex(base)}(_\\d+)?$`) })
-        .select('group_id')
-        .lean()
-    ).map((project) => project.group_id)
-  );
-
-  if (!taken.has(base)) return base;
-
-  for (let suffix = 2; suffix <= taken.size + 2; suffix += 1) {
-    // Keep room for the suffix inside the 50-character limit.
-    const candidate = `${base.slice(0, 50 - String(suffix).length - 1)}_${suffix}`;
-    if (!taken.has(candidate)) return candidate;
-  }
-
-  throw AppError.conflict(
-    `Too many projects derive the group_id "${base}". Send an explicit group_id.`
-  );
-};
 
 /** Shapes a project for the dashboard. Never includes the key hash. */
 const toProjectRecord = (project) => ({
@@ -110,6 +62,60 @@ const toProjectRecord = (project) => ({
 });
 
 /**
+ * Throws unless this user still has somewhere to log in to.
+ *
+ * Deactivating a project takes its customer's admins offline with it. Without
+ * this they would still authenticate and land on a dashboard scoped to a
+ * project that rejects every read — an empty screen with no explanation, which
+ * reads as a broken product rather than as a suspended account.
+ *
+ * Three cases, and the middle one is the deliberate exception:
+ *
+ *   super admin        — never blocked. Internal staff are unscoped, and they
+ *                        are the ones who have to log in to switch it back on.
+ *   no projects at all  — allowed. This is a fresh signup, not a suspension;
+ *                        nothing was deactivated underneath them. They see an
+ *                        empty dashboard until a super admin assigns them one.
+ *   projects, none live — blocked. Every project they hold is switched off.
+ *
+ * Called from login, from refresh, and from the authenticate middleware, so a
+ * deactivation lands on the customer's very next request rather than whenever
+ * their access token happens to expire.
+ *
+ * @param {object} user Mongoose User document (or lean equivalent).
+ * @param {object} [context]
+ * @param {string} [context.requestId]
+ * @returns {Promise<void>}
+ * @throws {AppError} 403 when every assigned project is inactive.
+ */
+const assertDashboardAccess = async (user, { requestId } = {}) => {
+  if (!user) throw AppError.unauthorized('Authentication required.');
+  if (user.role === ROLES.SUPER_ADMIN) return;
+
+  const assigned = user.projects ?? [];
+  if (!assigned.length) return;
+
+  const active = await Project.countDocuments({
+    group_id: { $in: [...assigned] },
+    is_active: true,
+  });
+
+  if (active > 0) return;
+
+  logger.warn('Dashboard access refused: every assigned project is deactivated', {
+    requestId,
+    userId: String(user._id),
+    projects: [...assigned],
+  });
+
+  throw AppError.forbidden(
+    assigned.length === 1
+      ? `Project "${assigned[0]}" has been deactivated, so this account cannot sign in. Contact your administrator.`
+      : 'Every project on this account has been deactivated, so it cannot sign in. Contact your administrator.'
+  );
+};
+
+/**
  * Loads a project by group_id or fails with a 404.
  *
  * @param {string} groupId
@@ -126,23 +132,167 @@ const findProjectOrFail = async (groupId) => {
 };
 
 /**
+ * Gives the customer contact a dashboard login for the project just created.
+ *
+ * This is signup, performed on the customer's behalf: it writes the same User
+ * row `POST /api/auth/signup` would, from the contact fields the super admin has
+ * already typed. `contact_email` becomes the username, `contact_phone` the
+ * phone number, `customer_name` the display name, and the password is either
+ * the one supplied or one generated here. The role comes from the project's
+ * type — see roleForProjectType.
+ *
+ * Two outcomes, and telling them apart is the whole point of this function:
+ *
+ *   the address is new       — an `admin` account is created holding this one
+ *                              project. A password is used if one was sent, and
+ *                              generated if not; either way the plaintext is
+ *                              returned once, here.
+ *   the address already has  — the account is left completely alone and the
+ *   an account                 project is *added* to what it already holds.
+ *                              Their password is not touched and not returned.
+ *                              Someone administering two sites is one person
+ *                              with one login, and silently resetting their
+ *                              password to set up a third would lock them out
+ *                              of the first two.
+ *
+ * A super admin's account is never converted into a customer login: they are
+ * unscoped by role, and putting a project list on one would read as a
+ * restriction it is not.
+ *
+ * @param {object} project Freshly created Project document.
+ * @param {object} payload The create-project payload.
+ * @param {object} [context]
+ * @returns {Promise<object>} The `login` block for the response.
+ * @throws {AppError} 400 when contact_email is missing.
+ */
+const provisionCustomerLogin = async (project, payload, { actor, requestId } = {}) => {
+  const log = logger.child({ requestId, group_id: project.group_id });
+
+  const email = String(payload.contact_email ?? '').trim().toLowerCase();
+
+  if (!email) {
+    throw AppError.badRequest('contact_email is required to create a login.', [
+      {
+        field: 'contact_email',
+        message: 'This address becomes the customer’s username, so it cannot be blank.',
+      },
+    ]);
+  }
+
+  const existing = await User.findOne({ email });
+
+  if (existing) {
+    if (existing.role === ROLES.SUPER_ADMIN) {
+      log.info('Contact address belongs to a super admin; no assignment needed');
+      return {
+        created: false,
+        already_existed: true,
+        user_id: String(existing._id),
+        email,
+        password_set: 'unchanged',
+        note: 'This address belongs to a super admin, who already sees every project. Nothing was changed.',
+      };
+    }
+
+    const assigned = new Set(existing.projects ?? []);
+    const alreadyHad = assigned.has(project.group_id);
+
+    if (!alreadyHad) {
+      assigned.add(project.group_id);
+      existing.projects = [...assigned];
+      await existing.save();
+    }
+
+    log.info('Existing account assigned to the new project', {
+      userId: String(existing._id),
+      by: actor ? String(actor._id) : 'system',
+    });
+
+    return {
+      created: false,
+      already_existed: true,
+      user_id: String(existing._id),
+      email,
+      name: existing.name,
+      phone_number: existing.phone_number ?? null,
+      role: existing.role,
+      password_set: 'unchanged',
+      note: 'This address already had an account, so the project was added to it. Their existing password still works and was not changed.',
+    };
+  }
+
+  const generated = !payload.password;
+  const password = payload.password || generateInitialPassword();
+
+  // Whoever runs a parking lot or a society is that site's operator, so the
+  // account is an `admin` — see roleForProjectType, which is where a new site
+  // type would state its own answer.
+  const role = roleForProjectType(project.project_type);
+
+  // Everything a signup would have written, with the contact fields the super
+  // admin already typed standing in for the form: contact_email is the
+  // username, contact_phone the phone number, customer_name the display name.
+  const user = await User.create({
+    name: payload.customer_name || project.group_id,
+    email,
+    phone_number: payload.contact_phone ?? null,
+    password_hash: password, // hashed by the model's pre-save hook
+    role,
+    projects: [project.group_id],
+    is_active: true,
+    created_by: actor ? actor._id : null,
+  });
+
+  log.info('Customer login created with the project', {
+    userId: String(user._id),
+    role,
+    project_type: project.project_type ?? null,
+    password: generated ? 'generated' : 'provided',
+    by: actor ? String(actor._id) : 'system',
+  });
+
+  return {
+    created: true,
+    already_existed: false,
+    user_id: String(user._id),
+    email,
+    name: user.name,
+    phone_number: user.phone_number,
+    role,
+    // Echoed only when this system chose it — a password the caller already
+    // knows does not need to be sent back, and returning it would put it in a
+    // response log for no reason.
+    password: generated ? password : undefined,
+    password_set: generated ? 'generated' : 'provided',
+    note: generated
+      ? 'Store this password now — it is shown once and only its hash is kept. The customer should change it after signing in.'
+      : 'The password you supplied is set on this account.',
+  };
+};
+
+/**
  * Creates a project and issues its Intozi API key.
  *
  * The plaintext key is returned once, here, and never again — only its SHA-256
  * is stored. Losing it means rotating, not recovering.
  *
- * @param {object} payload Validated: group_id, project_name, devices?, …
+ * With `create_login: true` the customer's dashboard account is provisioned in
+ * the same call, using `contact_email` as the username — see
+ * provisionCustomerLogin. Without it the project is created alone, and access
+ * is granted later through the user routes.
+ *
+ * @param {object} payload Validated: group_id, address, project_type, devices?,
+ *                 create_login?, password?, contact_email?, …
  * @param {object} [context]
  * @param {object} [context.actor]     The super admin performing the action.
  * @param {string} [context.requestId]
- * @returns {Promise<{ project: object, api_key: string }>}
- * @throws {AppError} 409 when group_id is taken.
+ * @returns {Promise<{ project: object, api_key: string, login: object|null }>}
+ * @throws {AppError} 409 when group_id is taken, 400 when a login was asked for
+ *         without a contact_email, 409 when that address is taken mid-flight.
  */
 const createProject = async (payload, { actor, requestId } = {}) => {
-  // Derived when the caller did not name one — see deriveGroupId.
-  const groupId = payload.group_id
-    ? String(payload.group_id).trim().toUpperCase()
-    : await deriveGroupId(payload.project_name);
+  const groupId = String(payload.group_id).trim().toUpperCase();
+  const wantsLogin = payload.create_login === true;
 
   const log = logger.child({ requestId, group_id: groupId });
 
@@ -153,12 +303,24 @@ const createProject = async (payload, { actor, requestId } = {}) => {
     );
   }
 
+  // Checked before anything is written, so the common mistake — asking for a
+  // login with no address to put it on — fails without leaving a project behind.
+  if (wantsLogin && !String(payload.contact_email ?? '').trim()) {
+    throw AppError.badRequest('contact_email is required to create a login.', [
+      {
+        field: 'contact_email',
+        message: 'This address becomes the customer’s username, so it cannot be blank.',
+      },
+    ]);
+  }
+
   const apiKey = generateProjectApiKey(groupId);
 
   try {
     const project = await Project.create({
       group_id: groupId,
-      project_name: payload.project_name,
+      // The project has one name, and this is it — see the note at the top.
+      project_name: groupId,
       address: payload.address ?? null,
       project_type: payload.project_type ?? null,
       description: payload.description ?? null,
@@ -168,7 +330,11 @@ const createProject = async (payload, { actor, requestId } = {}) => {
       devices: (payload.devices ?? []).map((device) => ({
         device_name: device.device_name,
         label: device.label ?? null,
-        direction: device.direction ?? null,
+        // Not settable on create — hard-coded rather than read from the payload,
+        // because nothing strips unknown keys before this point and a stray
+        // `direction` in the body would otherwise reach the document unvalidated.
+        // The per-device routes are where a gate's direction gets set.
+        direction: null,
         auto_registered: false,
         is_active: true,
       })),
@@ -185,7 +351,39 @@ const createProject = async (payload, { actor, requestId } = {}) => {
       by: actor ? String(actor._id) : 'system',
     });
 
-    return { project: toProjectRecord(project), api_key: apiKey };
+    let login = null;
+
+    if (wantsLogin) {
+      try {
+        login = await provisionCustomerLogin(project, payload, { actor, requestId });
+      } catch (error) {
+        // The project is already written at this point. There are no
+        // transactions here, so the alternative to undoing it is returning a
+        // half-built project the caller believes failed — and a group_id they
+        // cannot reuse because it is silently taken. Remove it and report the
+        // real error.
+        await Project.deleteOne({ _id: project._id }).catch((cleanupError) => {
+          log.error('Could not roll back the project after login provisioning failed', {
+            projectId: String(project._id),
+            error: cleanupError.message,
+          });
+        });
+
+        log.warn('Project creation rolled back: the login could not be provisioned', {
+          error: error.message,
+        });
+
+        if (error.code === 11000) {
+          throw AppError.conflict(
+            'An account with that contact_email was created moments ago. Retry, and the project will be assigned to it.'
+          );
+        }
+
+        throw error;
+      }
+    }
+
+    return { project: toProjectRecord(project), api_key: apiKey, login };
   } catch (error) {
     if (error.code === 11000) {
       throw AppError.conflict(`group_id "${groupId}" is already in use.`);
@@ -274,7 +472,8 @@ const getProject = async (groupId) => {
  *
  * `group_id` is deliberately not updatable: it is the key stamped on every
  * event already ingested and configured on the cameras themselves. Changing it
- * would orphan that history. Create a new project instead.
+ * would orphan that history. Create a new project instead. Since the project's
+ * name is that same identifier, it is not updatable either.
  *
  * @param {string} groupId
  * @param {object} payload
@@ -286,7 +485,6 @@ const updateProject = async (groupId, payload, { actor, requestId } = {}) => {
   const project = await findProjectOrFail(groupId);
 
   const updatable = [
-    'project_name',
     'address',
     'project_type',
     'description',
@@ -305,6 +503,65 @@ const updateProject = async (groupId, payload, { actor, requestId } = {}) => {
   log.info('Project updated', { by: actor ? String(actor._id) : 'system' });
 
   return toProjectRecord(project);
+};
+
+/**
+ * Deactivates a project. This is what DELETE means here — nothing is removed.
+ *
+ * A project is the key its whole history hangs off: every ingested event, every
+ * registered vehicle and every user assignment is stored against `group_id`, not
+ * against this document's id. Removing the row would orphan all of it, and
+ * because `group_id` could be handed out again afterwards, the orphans would
+ * reappear under whichever project claimed the identifier next. So the document
+ * stays and the switch flips: the cameras stop being able to post, the feed
+ * stops being readable, and the customer's admins can no longer sign in — see
+ * assertDashboardAccess. That is what "delete this customer" actually means
+ * operationally. `PATCH { "is_active": true }` puts all of it back.
+ *
+ * Idempotent — deleting an already-inactive project is a success, not a 409.
+ *
+ * @param {string} groupId
+ * @param {object} [context]
+ * @param {object} [context.actor]
+ * @param {string} [context.requestId]
+ * @returns {Promise<{ project: object, was_active: boolean, retained: object }>}
+ * @throws {AppError} 404 when the project does not exist.
+ */
+const deactivateProject = async (groupId, { actor, requestId } = {}) => {
+  const log = logger.child({ requestId, group_id: groupId });
+  const project = await findProjectOrFail(groupId);
+
+  const wasActive = project.is_active !== false;
+
+  if (wasActive) {
+    project.is_active = false;
+    await project.save();
+  }
+
+  // Reported back so the caller can see what deactivating just took offline,
+  // and what is still there to be restored.
+  const [registeredVehicles, totalEvents, assignedUsers] = await Promise.all([
+    RegisteredVehicle.countDocuments({ group_id: project.group_id }),
+    VehicleLog.countDocuments({ group_id: project.group_id }),
+    User.countDocuments({ projects: project.group_id }),
+  ]);
+
+  log.warn('Project deactivated — cameras blocked, feed closed, assigned admins locked out', {
+    by: actor ? String(actor._id) : 'system',
+    was_active: wasActive,
+    retained_events: totalEvents,
+    users_locked_out: assignedUsers,
+  });
+
+  return {
+    project: toProjectRecord(project),
+    was_active: wasActive,
+    retained: {
+      registered_vehicles: registeredVehicles,
+      total_events: totalEvents,
+      assigned_users: assignedUsers,
+    },
+  };
 };
 
 /**
@@ -346,7 +603,7 @@ const rotateApiKey = async (groupId, { actor, requestId } = {}) => {
  * @param {string} groupId
  * @param {object} payload Validated: device_name, label?, direction?
  * @returns {Promise<object>} The updated project.
- * @throws {AppError} 409 when the device name is taken.
+ * @throws {AppError} 409 when the device name is taken or the project is full.
  */
 const addDevice = async (groupId, payload, { actor, requestId } = {}) => {
   const log = logger.child({ requestId, group_id: groupId, device: payload.device_name });
@@ -369,6 +626,15 @@ const addDevice = async (groupId, payload, { actor, requestId } = {}) => {
 
     throw AppError.conflict(
       `Device "${payload.device_name}" already exists in project ${project.group_id}.`
+    );
+  }
+
+  // Checked here rather than only in the validator, because the validator sees
+  // one request while the ceiling is on the project as a whole.
+  if (project.devices.length >= MAX_DEVICES_PER_PROJECT) {
+    throw AppError.conflict(
+      `Project ${project.group_id} already has the maximum of ${MAX_DEVICES_PER_PROJECT} devices. ` +
+        'Remove one before adding another.'
     );
   }
 
@@ -426,9 +692,14 @@ const updateDevice = async (groupId, deviceName, payload, { actor, requestId } =
  * Events already ingested from it are untouched — they record the device name
  * as sent, not a reference to this list, so history survives the removal.
  *
+ * The last gate cannot be removed: a project with an empty device list receives
+ * nothing, and one that got there by deletion looks identical to one that was
+ * set up correctly. Deactivate the project instead, which says so explicitly.
+ *
  * @param {string} groupId
  * @param {string} deviceName
  * @returns {Promise<object>} The updated project.
+ * @throws {AppError} 404 unknown device · 409 it is the only one left.
  */
 const removeDevice = async (groupId, deviceName, { actor, requestId } = {}) => {
   const log = logger.child({ requestId, group_id: groupId, device: deviceName });
@@ -438,6 +709,13 @@ const removeDevice = async (groupId, deviceName, { actor, requestId } = {}) => {
 
   if (!device) {
     throw AppError.notFound(`No device named "${deviceName}" in project ${project.group_id}.`);
+  }
+
+  if (project.devices.length <= MIN_DEVICES_PER_PROJECT) {
+    throw AppError.conflict(
+      `Project ${project.group_id} must keep at least ${MIN_DEVICES_PER_PROJECT} device. ` +
+        'Add the replacement first, or deactivate the project.'
+    );
   }
 
   device.deleteOne();
@@ -472,6 +750,18 @@ const touchDevice = async (project, deviceName, { requestId } = {}) => {
 
     if (device) {
       device.last_seen_at = new Date();
+    } else if (project.devices.length >= MAX_DEVICES_PER_PROJECT) {
+      // At the ceiling, stop growing the list but keep the event. A project that
+      // has hit 50 gates this way is almost always one camera posting a
+      // malformed name on every event, and the alternative — an unbounded array
+      // on the document re-saved by every ingest — is the worse outcome.
+      logger.error('Device list is full; not auto-registering this gate', {
+        requestId,
+        group_id: project.group_id,
+        device_name: deviceName,
+        limit: MAX_DEVICES_PER_PROJECT,
+      });
+      return;
     } else {
       project.devices.push({
         device_name: String(deviceName).trim(),
@@ -503,6 +793,7 @@ module.exports = {
   listProjects,
   getProject,
   updateProject,
+  deactivateProject,
   rotateApiKey,
   addDevice,
   updateDevice,
@@ -510,4 +801,5 @@ module.exports = {
   touchDevice,
   findProjectOrFail,
   toProjectRecord,
+  assertDashboardAccess,
 };
