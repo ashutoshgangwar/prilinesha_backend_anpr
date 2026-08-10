@@ -573,6 +573,49 @@ const authSchemas = ({ ROLE_VALUES, PERMISSIONS, LIST_MAX_LIMIT }) => ({
     },
   },
 
+  DeviceList: {
+    type: 'object',
+    description:
+      'The gates of one project — what the vehicle-registration form’s gate picker reads.',
+    properties: {
+      success: { type: 'boolean', example: true },
+      message: { type: 'string', example: 'Devices fetched successfully.' },
+      count: { type: 'integer', description: 'Gates returned.', example: 2 },
+      data: {
+        type: 'object',
+        properties: {
+          group_id: { type: 'string', example: 'ACME_MALL' },
+          project_name: { type: 'string', example: 'ACME_MALL' },
+          project_is_active: { type: 'boolean', example: true },
+          devices: {
+            type: 'array',
+            description: 'The full gate objects, for a table or a picker that shows direction.',
+            items: { $ref: '#/components/schemas/ProjectDevice' },
+          },
+          device_names: {
+            type: 'array',
+            items: { type: 'string' },
+            description:
+              'The same gates flattened to their names — the shape `POST /api/vehicles` expects ' +
+              'back in `device_names`, so a picker binds to this and returns a subset of it ' +
+              'verbatim. A project with one gate returns one entry; a project with several ' +
+              'returns them all.',
+            example: ['Netru Pro Entry', 'exit1'],
+          },
+          count: { type: 'integer', example: 2 },
+          total_count: {
+            type: 'integer',
+            description:
+              'Gates the project holds in total, including the switched-off ones left out of ' +
+              'this response — so a UI can say "2 of 3" without a second call.',
+            example: 3,
+          },
+        },
+      },
+      requestId: { type: 'string', format: 'uuid' },
+    },
+  },
+
   AddDeviceRequest: {
     type: 'object',
     required: ['device_name'],
@@ -742,9 +785,19 @@ const authSchemas = ({ ROLE_VALUES, PERMISSIONS, LIST_MAX_LIMIT }) => ({
         type: 'array',
         items: { type: 'string' },
         description:
-          'Gates this registration is good for. Send an explicit `[]` to widen a restricted ' +
-          'registration back to every gate; omit the field to leave the list alone.',
+          'Gates this registration is good for, checked against the vehicle’s own project — ' +
+          'read the choices from `GET /api/projects/{group_id}/devices`. Send an explicit `[]` to ' +
+          'widen a restricted registration back to every gate; omit the field to leave the list ' +
+          'alone.',
         example: ['entry1'],
+      },
+      all_devices: {
+        type: 'boolean',
+        description:
+          'Widens the registration to every active gate of the project, written out by name. A ' +
+          'real edit on its own — sending only this is not an empty PATCH. Overrides ' +
+          '`device_names` when both are sent.',
+        example: true,
       },
       is_active: {
         type: 'boolean',

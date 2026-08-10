@@ -2,13 +2,20 @@ const express = require('express');
 
 const projectController = require('../controllers/projectController');
 const validate = require('../middleware/validate');
-const { authenticate, authorize, requireSuperAdmin } = require('../middleware/auth');
+const {
+  authenticate,
+  authorize,
+  requireSuperAdmin,
+  requireProjectAccess,
+} = require('../middleware/auth');
 const { PERMISSIONS } = require('../utils/constants');
 const {
   createProjectRules,
   updateProjectRules,
   listProjectsRules,
   groupIdParamRules,
+  listDevicesRules,
+  listScopedDevicesRules,
   addDeviceRules,
   updateDeviceRules,
   deviceParamRules,
@@ -80,6 +87,29 @@ router.get(
 );
 
 /**
+ * GET /api/projects/devices
+ * Authorization: Bearer <token>
+ *
+ * The gates of one project — the list the vehicle-registration form's gate
+ * picker binds to. `?group_id=` names the project; a user assigned to exactly
+ * one may omit it and get theirs. `?include_inactive=true` also returns gates
+ * that are switched off (left out by default — a decommissioned camera should
+ * not be offered as a choice).
+ *
+ * Declared **before** `/:group_id`, or Express would read "devices" as a
+ * group_id and hand the request to the super-admin-only project route.
+ *
+ * 200 ok · 400 more than one project and no group_id · 403 not your project
+ */
+router.get(
+  '/devices',
+  authorize(PERMISSIONS.PROJECT_READ),
+  validate(listScopedDevicesRules),
+  requireProjectAccess,
+  projectController.listDevices
+);
+
+/**
  * GET /api/projects/:group_id
  * Authorization: Bearer <token>   (super admin)
  *
@@ -148,6 +178,29 @@ router.post(
   authorize(PERMISSIONS.PROJECT_ROTATE_KEY),
   validate(groupIdParamRules),
   projectController.rotateApiKey
+);
+
+/**
+ * GET /api/projects/:group_id/devices
+ * Authorization: Bearer <token>
+ *
+ * The same gate list as `GET /api/projects/devices`, with the project named in
+ * the path — which is what a dashboard already holding a group_id sends.
+ *
+ * Returns both the full device objects and a flat `device_names` array, so a
+ * picker can bind to the names and post a subset of them straight back as
+ * `device_names` on `POST /api/vehicles`.
+ *
+ * Not super-admin-only, unlike `GET /api/projects/:group_id`: a customer admin
+ * registering a vehicle has to be able to see their own gates.
+ *
+ * 200 ok · 401 unauthorized · 403 not your project · 404 unknown project
+ */
+router.get(
+  '/:group_id/devices',
+  authorize(PERMISSIONS.PROJECT_READ),
+  validate(listDevicesRules),
+  projectController.listDevices
 );
 
 /**

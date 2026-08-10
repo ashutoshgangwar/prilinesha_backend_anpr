@@ -260,6 +260,33 @@ const listProjectsRules = [
 
 const groupIdParamRules = [groupIdParamRule];
 
+// Off by default: a decommissioned gate must not be offered as a choice on the
+// vehicle-registration form. An admin screen listing what a project has sends
+// `include_inactive=true`.
+const includeInactiveRule = query('include_inactive')
+  .optional({ nullable: true, checkFalsy: true })
+  .isBoolean()
+  .withMessage('include_inactive must be true or false.')
+  .toBoolean();
+
+const listDevicesRules = [groupIdParamRule, includeInactiveRule];
+
+// The same list without the project in the path: `?group_id=` names it, and a
+// user assigned to exactly one project may omit it entirely — requireProjectAccess
+// fills it in. Optional here for that reason; it is not optional in effect.
+const listScopedDevicesRules = [
+  query('group_id')
+    .optional({ nullable: true, checkFalsy: true })
+    .isString()
+    .withMessage('group_id must be a string.')
+    .bail()
+    .trim()
+    .toUpperCase()
+    .matches(GROUP_ID_PATTERN)
+    .withMessage('group_id is not a valid project identifier (e.g. ACME_MALL).'),
+  includeInactiveRule,
+];
+
 const addDeviceRules = [groupIdParamRule, deviceNameRule(body), optionalText('label', 150), directionRule];
 
 const updateDeviceRules = [
@@ -281,6 +308,8 @@ module.exports = {
   updateProjectRules,
   listProjectsRules,
   groupIdParamRules,
+  listDevicesRules,
+  listScopedDevicesRules,
   addDeviceRules,
   updateDeviceRules,
   deviceParamRules,

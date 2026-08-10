@@ -15,13 +15,28 @@ const DEFAULT_VEHICLE_TYPE = 'unregistered';
 
 /**
  * The complete set of fields the Intozi feed (GET /api/feed) discloses. It reads
- * the registered-vehicle registry, and returns only these three keys — the
- * owner's name, their phone number and the gate list stay internal.
+ * the registered-vehicle registry, and returns only these keys — the owner's
+ * name and their phone number stay internal.
+ *
+ * `device_names` is on the list because a registration can be limited to
+ * specific gates, and a feed that omits them tells Intozi a plate is
+ * "registered" without saying where. The barrier decision needs both. It is the
+ * gate names only — no labels, no directions, nothing else off the project.
+ *
+ * `all_gates` says what an empty `device_names` means. `[]` is the wildcard
+ * internally, but "empty list" reads just as easily as "no gates allowed" to a
+ * consumer working from the JSON, and guessing wrong opens or blocks a barrier.
  *
  * Kept as a list so a test can assert the response shape exactly, rather than
  * trusting that nothing was added to the projection by accident.
  */
-const FEED_DISCLOSED_FIELDS = ['vehicle_number', 'group_id', 'vehicle_type'];
+const FEED_DISCLOSED_FIELDS = [
+  'vehicle_number',
+  'group_id',
+  'vehicle_type',
+  'device_names',
+  'all_gates',
+];
 
 /** Paging limits for the Intozi polling feed. */
 const FEED_DEFAULT_LIMIT = 100;

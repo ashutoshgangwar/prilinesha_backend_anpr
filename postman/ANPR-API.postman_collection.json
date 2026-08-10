@@ -400,6 +400,46 @@
       ]
     },
     {
+      "name": "7b. Projects - list the gates (vehicle form picker)",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          }
+        ],
+        "description": "The gate list the vehicle-registration form binds to. Returns `device_names` — one entry for a project with one gate, all of them for a project with several — plus the full device objects. Not super-admin only: a customer admin reads the gates of their own project. Switched-off gates are left out; add `?include_inactive=true` to see them. `GET /api/projects/devices` is the same list for a caller assigned to exactly one project, with no group_id in the path.",
+        "url": {
+          "raw": "{{base_url}}/api/projects/{{group_id}}/devices",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "projects",
+            "{{group_id}}",
+            "devices"
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 ok', () => pm.response.to.have.status(200));",
+              "const d = pm.response.json().data;",
+              "pm.test('device_names is a list of gate names', () => pm.expect(d.device_names).to.be.an('array'));",
+              "pm.test('one entry per returned device', () => pm.expect(d.device_names.length).to.eql(d.devices.length));",
+              "if (d.device_names.length) pm.collectionVariables.set('device_name', d.device_names[0]);"
+            ]
+          }
+        }
+      ]
+    },
+    {
       "name": "8. Users - assign the project (THE ACCESS GRANT)",
       "request": {
         "method": "PUT",
@@ -568,6 +608,50 @@
               "const v = pm.response.json().data;",
               "pm.test('plate stored uppercase', () => pm.expect(v.vehicle_number).to.eql('MH12AB1234'));",
               "pm.test('status derived from valid_till', () => pm.expect(v.status).to.be.oneOf(['registered', 'unregistered']));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Dashboard - register vehicle at all gates (all_devices)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          }
+        ],
+        "description": "`all_devices: true` is the form's \"all gates\" tick: every active gate of the project is stored on the record by name, rather than being implied by an empty list. Send `device_names` instead to restrict the vehicle to the gates the operator picked — those names are validated against the project, so a typo is a 400.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"vehicle_number\": \"MH12ZZ7788\",\n  \"name\": \"Anita Rao\",\n  \"phone_number\": \"+91 9876543299\",\n  \"valid_till\": \"2027-03-31\",\n  \"all_devices\": true\n}"
+        },
+        "url": {
+          "raw": "{{base_url}}/api/vehicles",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "vehicles"
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 201 (created) or 200 (renewed)', () => pm.expect(pm.response.code).to.be.oneOf([200, 201]));",
+              "const v = pm.response.json().data;",
+              "pm.test('every gate written out by name', () => pm.expect(v.device_names).to.be.an('array').that.is.not.empty);"
             ]
           }
         }

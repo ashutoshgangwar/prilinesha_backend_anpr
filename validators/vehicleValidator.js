@@ -26,6 +26,29 @@ const vehicleModelRule = (field) =>
     .withMessage('vehicle_model must be at most 100 characters.')
     .customSanitizer((value) => value || null);
 
+/**
+ * "All gates" as an explicit choice on the registration form.
+ *
+ * When true, the service expands it to every active gate on the project and
+ * stores those names — so the record states which gates the vehicle was granted
+ * at, rather than leaving it implied by an empty list. It takes precedence over
+ * anything sent in `device_names`: a form that ticks "all" and also submits the
+ * boxes it had checked means "all", and the two cannot disagree.
+ *
+ * The empty-list wildcard still works and still means every gate. The
+ * difference is what happens to a gate added later: an expanded list does not
+ * include it, an empty one does.
+ *
+ * @param {Function} field `body` for a request field.
+ */
+const allDevicesRule = (field) =>
+  field('all_devices')
+    .optional({ nullable: true })
+    .isBoolean()
+    .withMessage('all_devices must be true or false.')
+    .bail()
+    .toBoolean();
+
 const toInclusiveEndOfDay = (value) => {
   const isDateOnly = /^\d{4}-\d{2}-\d{2}$/.test(value);
   if (isDateOnly) return new Date(`${value}T23:59:59.999Z`);
@@ -109,6 +132,11 @@ const registerVehicleRules = [
       return true;
     }),
 
+  // Which gates the vehicle is registered at. Pick them from
+  // `GET /api/projects/{group_id}/devices`; every name is checked against that
+  // project, so a gate that does not exist is a 400 rather than a restriction
+  // no camera will ever satisfy.
+  //
   // Empty or omitted means "valid at every gate in the project", which is the
   // normal case; a list restricts the registration to those gates only.
   body('device_names')
@@ -123,6 +151,8 @@ const registerVehicleRules = [
     .trim()
     .matches(DEVICE_NAME_PATTERN)
     .withMessage('each device name must be 1-50 characters of letters, digits, dots, underscores or hyphens.'),
+
+  allDevicesRule(body),
 ];
 
 const vehicleIdParamRule = param('id')
@@ -193,6 +223,8 @@ const updateVehicleRules = [
     .trim()
     .matches(DEVICE_NAME_PATTERN)
     .withMessage('each device name must be 1-50 characters of letters, digits, dots, underscores or hyphens.'),
+
+  allDevicesRule(body),
 
   body('is_active')
     .optional()

@@ -160,6 +160,32 @@ const rotateApiKey = asyncHandler(async (req, res) => {
 });
 
 /**
+ * GET /api/projects/:group_id/devices
+ * The project's gates, and nothing else — this is what the vehicle-registration
+ * form's gate picker reads.
+ *
+ * Unlike `GET /api/projects/:group_id`, a customer admin may call it for a
+ * project assigned to them: `assertProjectAccess` decides, not the role.
+ */
+const listDevices = asyncHandler(async (req, res) => {
+  const groupId = req.params.group_id ?? req.groupId;
+
+  assertProjectAccess(req, groupId);
+
+  const data = await projectService.listDevices(groupId, {
+    includeInactive: req.query.include_inactive === true,
+  });
+
+  res.status(200).json({
+    success: true,
+    message: 'Devices fetched successfully.',
+    count: data.count,
+    data,
+    requestId: req.id,
+  });
+});
+
+/**
  * POST /api/projects/:group_id/devices
  * Adds a gate (entry1, exit2, …) to the project.
  */
@@ -222,6 +248,7 @@ module.exports = {
   updateProject,
   deleteProject,
   rotateApiKey,
+  listDevices,
   addDevice,
   updateDevice,
   removeDevice,

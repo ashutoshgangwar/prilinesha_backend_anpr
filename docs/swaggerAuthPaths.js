@@ -331,7 +331,75 @@ const projectPaths = {
     },
   },
 
+  '/api/projects/devices': {
+    get: {
+      tags: ['Projects'],
+      summary: 'Gates of your project (group_id in the query)',
+      description:
+        'The same list as `GET /api/projects/{group_id}/devices`, for a client that does not have ' +
+        'the project in hand: pass `?group_id=`, or omit it entirely if your account is assigned ' +
+        'to exactly **one** project — that one is used. With access to several you must name one, ' +
+        'or the call is a 400.',
+      security: [{ BearerAuth: [] }],
+      parameters: [
+        {
+          name: 'group_id',
+          in: 'query',
+          schema: { type: 'string', example: 'ACME_MALL' },
+          description: 'Optional for a user assigned to exactly one project.',
+        },
+        {
+          name: 'include_inactive',
+          in: 'query',
+          schema: { type: 'boolean', default: false },
+          description: 'Also return gates that are switched off.',
+        },
+      ],
+      responses: {
+        200: { description: 'Devices', content: json('#/components/schemas/DeviceList') },
+        400: errors[400],
+        401: errors[401],
+        403: errors[403],
+        404: errors[404],
+        500: errors[500],
+      },
+    },
+  },
+
   '/api/projects/{group_id}/devices': {
+    get: {
+      tags: ['Projects'],
+      summary: 'Gates of one project',
+      description:
+        'The gate list on its own — this is what the **vehicle-registration form** reads to fill ' +
+        'its gate picker. A project with a single gate returns one entry, a project with several ' +
+        'returns all of them, and the caller posts back whichever were ticked as `device_names` ' +
+        'on `POST /api/vehicles` (or `all_devices: true` for every one).\n\n' +
+        'Unlike `GET /api/projects/{group_id}`, this is **not** super-admin only: a customer admin ' +
+        'can read the gates of a project assigned to them, which is the whole point — they are the ' +
+        'ones registering vehicles. It is also just the gates: no vehicle, event or user counts.\n\n' +
+        'Gates that are switched off are left out, so a decommissioned camera is never offered as ' +
+        'a choice; `include_inactive=true` brings them back for an admin screen. `total_count` ' +
+        'always reports everything the project holds.',
+      security: [{ BearerAuth: [] }],
+      parameters: [
+        groupIdParam,
+        {
+          name: 'include_inactive',
+          in: 'query',
+          schema: { type: 'boolean', default: false },
+          description: 'Also return gates that are switched off.',
+        },
+      ],
+      responses: {
+        200: { description: 'Devices', content: json('#/components/schemas/DeviceList') },
+        400: errors[400],
+        401: errors[401],
+        403: errors[403],
+        404: errors[404],
+        500: errors[500],
+      },
+    },
     post: {
       tags: ['Projects'],
       summary: 'Add a gate to the project',

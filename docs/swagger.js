@@ -206,8 +206,8 @@ const swaggerSpec = {
       VehicleFeedRecord: {
         type: 'object',
         description:
-          'One registered vehicle on the Intozi feed. Exactly three fields are disclosed; the ' +
-          'owner name, phone number and gate list on the underlying record stay internal.',
+          'One registered vehicle on the Intozi feed. Only the fields below are disclosed; the ' +
+          'owner name and phone number on the underlying record stay internal.',
         properties: {
           vehicle_number: { type: 'string', nullable: true, example: 'UP32AB1234' },
           group_id: {
@@ -222,9 +222,30 @@ const swaggerSpec = {
             type: 'string',
             enum: VEHICLE_TYPES,
             description:
-              'Derived from `valid_till` at read time — `unregistered` once the registration ' +
-              'has expired. Never stored, so it cannot go stale.',
+              'Derived from `valid_till` and the manual switch at read time — `unregistered` once ' +
+              'the registration has expired or has been switched off. Never stored, so it cannot ' +
+              'go stale.\n\n' +
+              '**Not a barrier decision on its own** — read it together with `device_names`.',
             example: 'registered',
+          },
+          device_names: {
+            type: 'array',
+            items: { type: 'string' },
+            description:
+              'The gates this registration is good for, as configured on the project. A vehicle ' +
+              'that is `registered` but whose list does not name the gate it just arrived at must ' +
+              'be treated as unregistered there — that is the whole reason the list is on the ' +
+              'feed.\n\n' +
+              'Empty means it is not restricted to any gate; `all_gates` says so explicitly.',
+            example: ['Netru Pro Entry', 'exit1'],
+          },
+          all_gates: {
+            type: 'boolean',
+            description:
+              '`true` when `device_names` is empty — the registration is valid at **every** gate ' +
+              'of the project. Sent because an empty array reads just as easily as "no gates ' +
+              'allowed", and guessing wrong opens or blocks a barrier.',
+            example: false,
           },
         },
       },
@@ -296,10 +317,25 @@ const swaggerSpec = {
             type: 'array',
             items: { type: 'string' },
             description:
-              'Restricts the registration to specific gates. Empty or omitted means every gate in ' +
-              'the project, which is the normal case. At a gate not on the list, the vehicle is ' +
-              'reported as unregistered.',
+              'Restricts the registration to specific gates. Pick them from ' +
+              '`GET /api/projects/{group_id}/devices` — every name is checked against that ' +
+              'project, matched case-insensitively and stored with the project\'s own casing, so ' +
+              'a gate that does not exist is a 400 rather than a restriction no camera can ever ' +
+              'satisfy.\n\n' +
+              'Empty or omitted means every gate in the project, which is the normal case. At a ' +
+              'gate not on the list, the vehicle is reported as unregistered.',
             example: ['entry1', 'exit1'],
+          },
+          all_devices: {
+            type: 'boolean',
+            description:
+              '"All gates", as an explicit choice on the form. Stores **every active gate of the ' +
+              'project by name**, so the record states what was granted instead of leaving it ' +
+              'implied. Takes precedence over `device_names` when both are sent.\n\n' +
+              'It differs from an empty `device_names` in one way that matters: an expanded list ' +
+              'is a snapshot, so a gate added to the project later is *not* covered until the ' +
+              'vehicle is saved again, while an empty list follows the project automatically.',
+            example: true,
           },
         },
       },
@@ -516,9 +552,14 @@ const swaggerSpec = {
           'Designed to be polled every 5-10 seconds. Reads the **registered-vehicle registry** — ' +
           'not the detection log — so every vehicle the dashboard knows about appears here ' +
           'whether or not a camera has ever seen it.\n\n' +
-          'Each row is exactly `vehicle_number`, `group_id` and `vehicle_type`. ' +
-          '`vehicle_type` is derived from `valid_till` at read time, so a registration that ' +
-          'lapsed a minute ago already reads `unregistered`.\n\n' +
+          'Each row is `vehicle_number`, `group_id`, `vehicle_type`, `device_names` and ' +
+          '`all_gates`. `vehicle_type` is derived from `valid_till` at read time, so a ' +
+          'registration that lapsed a minute ago already reads `unregistered`.\n\n' +
+          '**Read the status and the gates together.** A registration can be limited to specific ' +
+          'gates, so `vehicle_type: "registered"` means "this pass is current", not "open the ' +
+          'barrier anywhere". At a gate that is not in `device_names` — and when `all_gates` is ' +
+          'false — the vehicle must be treated as unregistered. Prilinesha applies that same rule ' +
+          'itself when it stamps an incoming event.\n\n' +
           '**Polling loop:** call once without parameters (returns the newest page), then send the ' +
           '`next_cursor` from every response back as `cursor`. Each row is delivered exactly once; ' +
           'renewing a registration re-sends it with its new status, which is how a poller learns ' +
@@ -601,7 +642,11 @@ const swaggerSpec = {
           'registered under a different `group_id` is an entirely separate record.\n\n' +
           '`group_id` may be omitted by a user assigned to exactly one project; anyone with access ' +
           'to several must name one, because guessing on their behalf is how data lands in the ' +
-          'wrong tenant.',
+          'wrong tenant.\n\n' +
+          '**Gates.** Fetch the project\'s gates from `GET /api/projects/{group_id}/devices` and ' +
+          'send back the ones the operator picked as `device_names`, or `all_devices: true` for ' +
+          'every gate. Names are validated against that project, so a typo is a 400 rather than a ' +
+          'registration silently restricted to a gate that does not exist.',
         security: [{ BearerAuth: [] }],
         requestBody: {
           required: true,

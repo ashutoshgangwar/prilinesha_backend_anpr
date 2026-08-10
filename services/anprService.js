@@ -162,25 +162,40 @@ const createAnprEvent = async (payload, { project, requestId } = {}) => {
 /**
  * Shapes one registration into the record Intozi expects.
  *
- * Exactly three fields go out: the plate, the project it belongs to, and whether
- * it is currently registered. Everything else on the record — the owner's name,
- * their phone number, which gates it is good for — is internal and never leaves
- * the dashboard. Building the object literally, rather than deleting fields from
- * the document, means a column added to the registry later cannot leak by
- * default.
+ * The fields that go out are exactly FEED_DISCLOSED_FIELDS: the plate, the
+ * project, whether it is currently registered, and the gates that holds at.
+ * Everything else on the record — the owner's name, their phone number, who
+ * registered it — is internal and never leaves the dashboard. Building the
+ * object literally, rather than deleting fields from the document, means a
+ * column added to the registry later cannot leak by default.
+ *
+ * The gates are disclosed because `vehicle_type` alone is not a barrier
+ * decision: a registration restricted to `entry1` is `registered` here and must
+ * still be refused at `exit2`. Prilinesha applies that rule itself when it
+ * stamps an incoming event (see resolveVehicleStatus), but a poller acting on
+ * the feed has no way to apply it without the list.
  *
  * @param {object} record Lean RegisteredVehicle document.
  * @param {Date} now      Instant to judge `valid_till` against.
  */
-const toFeedRecord = (record, now) => ({
-  vehicle_number: record.vehicle_number ?? null,
-  group_id: record.group_id ?? null,
-  // Derived, never stored, from the same two fields the dashboard reads: the
-  // moment valid_till passes the plate reads as unregistered without anyone
-  // flipping a flag, and a registration switched off on the dashboard reads as
-  // unregistered here on the very next poll.
-  vehicle_type: record.valid_till ? statusOf(record, now) : DEFAULT_VEHICLE_TYPE,
-});
+const toFeedRecord = (record, now) => {
+  const deviceNames = record.device_names ?? [];
+
+  return {
+    vehicle_number: record.vehicle_number ?? null,
+    group_id: record.group_id ?? null,
+    // Derived, never stored, from the same two fields the dashboard reads: the
+    // moment valid_till passes the plate reads as unregistered without anyone
+    // flipping a flag, and a registration switched off on the dashboard reads as
+    // unregistered here on the very next poll.
+    vehicle_type: record.valid_till ? statusOf(record, now) : DEFAULT_VEHICLE_TYPE,
+    // The gates this registration is good for. Empty means it is not restricted
+    // to any, which is why the flag below spells that out rather than leaving a
+    // consumer to infer it from a `[]`.
+    device_names: [...deviceNames],
+    all_gates: deviceNames.length === 0,
+  };
+};
 
 /**
  * Reads the vehicle list consumed by the Intozi server every 5-10 seconds.
@@ -261,8 +276,8 @@ const getVehicleFeed = async (
   }
 
   // is_active is read but never emitted — it feeds vehicle_type, which is the
-  // only form the feed discloses it in.
-  const projection = 'vehicle_number group_id valid_till is_active updatedAt';
+  // only form the feed discloses it in. Everything else here goes out as-is.
+  const projection = 'vehicle_number group_id valid_till is_active device_names updatedAt';
 
   // Always oldest-first, including the very first call.
   //

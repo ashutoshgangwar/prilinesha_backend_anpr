@@ -329,17 +329,23 @@ stays an honest record of what the vehicle was at the moment it was seen.
 
 ### What the feed discloses
 
-`GET /api/anpr/feed` returns the plate and its status. Every other field is `null` **by contract**,
-even when the database holds a value:
+`GET /api/anpr/feed` returns the plate, the project, the status and the gates the registration is
+good for — the five fields in `FEED_DISCLOSED_FIELDS`, and nothing else. The owner's name and phone
+number never leave the dashboard:
 
 ```json
 {
-  "owner_name": null, "created_datetime": null, "contact_no": null,
-  "email": null, "driver_name": null, "vehicle_model": null,
+  "vehicle_number": "MH12AB1234",
+  "group_id": "ACME_MALL",
   "vehicle_type": "registered",
-  "vehicle_number": "MH12AB1234"
+  "device_names": ["Netru Pro Entry"],
+  "all_gates": false
 }
 ```
+
+The gates are on the feed because `vehicle_type` alone is not a barrier decision: the row above is a
+current pass that must still be refused at `exit1`. `all_gates` states what an empty `device_names`
+means, so a consumer never has to guess whether `[]` is "everywhere" or "nowhere".
 
 ---
 

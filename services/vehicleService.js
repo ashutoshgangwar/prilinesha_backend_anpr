@@ -1,6 +1,7 @@
 const RegisteredVehicle = require('../models/RegisteredVehicle');
 const AppError = require('../utils/AppError');
 const logger = require('../utils/logger');
+const { resolveDeviceNames } = require('./projectService');
 const { REGISTRY_DEFAULT_LIMIT, REGISTRY_MAX_LIMIT } = require('../utils/constants');
 
 /**
@@ -136,8 +137,14 @@ const toDashboardRecord = (record, now) => {
  * deactivated would hand back a record that says registered and a barrier that
  * refuses to open. Use `PATCH /api/vehicles/:id/status` to suspend one.
  *
+ * The gate selection is resolved against the project before anything is
+ * written — see resolveDeviceNames. `all_devices: true` is stored as every
+ * active gate by name, a list is checked to be real gates and rewritten to their
+ * stored casing, and omitting both stores `[]`, which means every gate.
+ *
  * @param {object} payload Validated body: group_id, vehicle_number, name,
- *                         phone_number, valid_till, vehicle_model?, device_names?
+ *                         phone_number, valid_till, vehicle_model?,
+ *                         device_names?, all_devices?
  * @param {object} [context]
  * @param {object} [context.actor]     Dashboard user performing the action.
  * @param {string} [context.requestId] Correlation id for logging.
@@ -150,6 +157,15 @@ const registerVehicle = async (payload, { actor, requestId } = {}) => {
     vehicle_number: payload.vehicle_number,
   });
   const now = new Date();
+
+  // Before the upsert, so an unknown gate name fails the request rather than
+  // being stored as a restriction no camera can ever satisfy. `undefined` back
+  // means neither field was sent, which on a create is the "every gate" default.
+  const deviceNames =
+    (await resolveDeviceNames(payload.group_id, {
+      deviceNames: payload.device_names,
+      allDevices: payload.all_devices,
+    })) ?? [];
 
   // The identity of a registration is the pair, never the plate alone.
   const identity = { group_id: payload.group_id, vehicle_number: payload.vehicle_number };
@@ -164,7 +180,7 @@ const registerVehicle = async (payload, { actor, requestId } = {}) => {
           name: payload.name,
           phone_number: payload.phone_number,
           valid_till: payload.valid_till,
-          device_names: payload.device_names ?? [],
+          device_names: deviceNames,
           is_active: true,
           updated_by: actor ? actor._id : null,
 
@@ -371,7 +387,12 @@ const getVehicle = async (id, scopeFilter = {}) => {
  *
  * Only the fields present in the payload change — this is a PATCH, so omitting
  * `device_names` leaves the gate list alone rather than clearing it. Sending an
- * explicit `[]` is how you widen a restricted registration back to every gate.
+ * explicit `[]` is how you widen a restricted registration back to every gate,
+ * and `all_devices: true` widens it to every gate the project has *by name*.
+ *
+ * A gate list sent here is checked against the vehicle's own project, not
+ * against one named in the body — `group_id` is not editable, so there is only
+ * ever one project a gate could belong to.
  *
  * `group_id` and `vehicle_number` are deliberately not editable. Together they
  * are the row's identity and its unique index; changing either is registering a
@@ -380,7 +401,7 @@ const getVehicle = async (id, scopeFilter = {}) => {
  *
  * @param {string} id
  * @param {object} payload Validated: name?, phone_number?, vehicle_model?,
- *                         valid_till?, device_names?, is_active?
+ *                         valid_till?, device_names?, all_devices?, is_active?
  * @param {object} scopeFilter
  * @param {object} [context]
  * @param {object} [context.actor]
@@ -396,6 +417,16 @@ const updateVehicle = async (id, payload, scopeFilter = {}, { actor, requestId }
     group_id: record.group_id,
     vehicle_number: record.vehicle_number,
   });
+
+  // Resolved onto `device_names` so the rest of this function sees one field.
+  // `all_devices` on its own is a real edit — it becomes the project's gate
+  // list — so this runs before the "nothing to update" check below.
+  const resolved = await resolveDeviceNames(record.group_id, {
+    deviceNames: payload.device_names,
+    allDevices: payload.all_devices,
+  });
+
+  if (resolved !== undefined) payload.device_names = resolved;
 
   const updatable = [
     'name',

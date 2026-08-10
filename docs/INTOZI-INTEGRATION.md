@@ -219,12 +219,16 @@ Authorization: Bearer pk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
     {
       "vehicle_number": "DL3CC9876",
       "group_id": "ACME_MALL_PARKING",
-      "vehicle_type": "registered"
+      "vehicle_type": "registered",
+      "device_names": [],
+      "all_gates": true
     },
     {
       "vehicle_number": "DL5CX1222",
       "group_id": "ACME_MALL_PARKING",
-      "vehicle_type": "unregistered"
+      "vehicle_type": "registered",
+      "device_names": ["Netru Pro Entry"],
+      "all_gates": false
     }
   ],
   "requestId": "a618d237-88f8-4d4b-bd47-62713898ed3c"
@@ -241,9 +245,24 @@ Authorization: Bearer pk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 | `data[].vehicle_number` | The plate, uppercased |
 | `data[].group_id` | The project this vehicle is registered under |
 | `data[].vehicle_type` | `registered` or `unregistered` |
+| `data[].device_names` | The gates this registration is good for. Names exactly as the cameras report them |
+| `data[].all_gates` | `true` when `device_names` is empty — valid at **every** gate of the project |
 
-Each row contains **exactly these three fields**. Owner names, phone numbers and
-gate restrictions are held on the Prilinesha side and are never sent.
+Each row contains **exactly these five fields**. Owner names and phone numbers
+are held on the Prilinesha side and are never sent.
+
+> **`vehicle_type` is not a barrier decision on its own.** A registration can be
+> limited to specific gates, so `registered` means "this pass is current", not
+> "open anywhere". At a gate whose `device_name` is not in `device_names` — and
+> where `all_gates` is `false` — treat the vehicle as **unregistered**:
+>
+> ```
+> allowed = vehicle_type == "registered"
+>           and (all_gates or device_name in device_names)
+> ```
+>
+> Match the gate name case-insensitively; Prilinesha applies exactly this rule
+> when it stamps an incoming event, so the two sides agree.
 
 `vehicle_type` is computed when you read it, from the registration's expiry date.
 A registration that lapsed a minute ago already reads `unregistered`; nothing has

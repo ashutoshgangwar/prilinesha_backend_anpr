@@ -32,6 +32,17 @@ const {
 
 const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
+/** Shapes one gate for the dashboard and for the gate picker. */
+const toDeviceRecord = (device) => ({
+  id: String(device._id),
+  device_name: device.device_name,
+  label: device.label ?? null,
+  direction: device.direction ?? null,
+  auto_registered: Boolean(device.auto_registered),
+  last_seen_at: device.last_seen_at ?? null,
+  is_active: device.is_active !== false,
+});
+
 /** Shapes a project for the dashboard. Never includes the key hash. */
 const toProjectRecord = (project) => ({
   id: String(project._id),
@@ -43,15 +54,7 @@ const toProjectRecord = (project) => ({
   customer_name: project.customer_name ?? null,
   contact_email: project.contact_email ?? null,
   contact_phone: project.contact_phone ?? null,
-  devices: (project.devices ?? []).map((device) => ({
-    id: String(device._id),
-    device_name: device.device_name,
-    label: device.label ?? null,
-    direction: device.direction ?? null,
-    auto_registered: Boolean(device.auto_registered),
-    last_seen_at: device.last_seen_at ?? null,
-    is_active: device.is_active !== false,
-  })),
+  devices: (project.devices ?? []).map(toDeviceRecord),
   device_count: (project.devices ?? []).length,
   // Enough to identify the installed key, not enough to reproduce it.
   api_key_last4: project.api_key_last4 ?? null,
@@ -727,6 +730,172 @@ const removeDevice = async (groupId, deviceName, { actor, requestId } = {}) => {
 };
 
 /**
+ * The gate list of a single project — nothing else.
+ *
+ * `GET /api/projects/{group_id}` already returns the devices, but it is super
+ * admin only and it counts vehicles, events and users to build its header. The
+ * one screen that needs this list is the vehicle-registration form, opened by a
+ * customer admin who must not be able to read the project registry, and it needs
+ * the gates and nothing more. So this is its own read: scoped by
+ * `assertProjectAccess` rather than by role, and one indexed lookup with no
+ * counts attached.
+ *
+ * Inactive gates are left out by default. A decommissioned camera should not be
+ * offered as a choice on a form — but it stays visible with
+ * `include_inactive=true`, so an admin screen can still show what a project has.
+ *
+ * @param {string} groupId
+ * @param {object} [options]
+ * @param {boolean} [options.includeInactive] Include gates switched off.
+ * @returns {Promise<object>} The gates, plus the bare `device_names` array a
+ *          picker can bind to directly.
+ * @throws {AppError} 404 when the project does not exist.
+ */
+const listDevices = async (groupId, { includeInactive = false } = {}) => {
+  const normalised = String(groupId || '').trim().toUpperCase();
+
+  const project = await Project.findOne({ group_id: normalised })
+    .select('group_id project_name is_active devices')
+    .lean();
+
+  if (!project) throw AppError.notFound(`No project found with group_id "${normalised}".`);
+
+  const all = project.devices ?? [];
+  const visible = includeInactive ? all : all.filter((device) => device.is_active !== false);
+
+  return {
+    group_id: project.group_id,
+    project_name: project.project_name,
+    project_is_active: project.is_active !== false,
+    devices: visible.map(toDeviceRecord),
+    // The same thing flattened, because that is the shape a form posts back in
+    // `device_names` — a picker binds to this and returns a subset of it
+    // verbatim, with no client-side mapping to get wrong.
+    device_names: visible.map((device) => device.device_name),
+    count: visible.length,
+    // How many the project actually holds, so a UI can say "2 of 5 gates are
+    // switched off" without a second call.
+    total_count: all.length,
+  };
+};
+
+/**
+ * Turns a gate selection from the vehicle form into the list to store.
+ *
+ * Three inputs, and they mean different things:
+ *
+ *   allDevices: true — the operator ticked "all gates". Every active gate in the
+ *                      project is written out **by name**, so the record states
+ *                      which gates it was granted at rather than implying it.
+ *   a list of names  — restricted to those gates. Matched case-insensitively
+ *                      against the project and rewritten to the stored casing,
+ *                      so "ENTRY1" and "entry1" cannot both end up on record for
+ *                      one gate. An unknown name is a 400 listing the real ones,
+ *                      never a silently-stored gate that no camera will ever
+ *                      report.
+ *   an empty list    — every gate, expressed as the legacy wildcard. Kept
+ *                      working because it is what existing records hold and what
+ *                      the feed already understands: `[]` means "no restriction".
+ *
+ * Note the difference between the first and the last: ticking "all gates" pins
+ * the registration to the gates that exist *today*, so a gate added next month
+ * is not automatically included, while `[]` follows the project. Expanding is
+ * what the dashboard asked for — the stored record then says exactly what was
+ * granted — but it does mean a new gate needs the vehicle re-saved.
+ *
+ * @param {string} groupId
+ * @param {object} [selection]
+ * @param {string[]} [selection.deviceNames]
+ * @param {boolean} [selection.allDevices]
+ * @returns {Promise<string[]|undefined>} The names to store, or `undefined` when
+ *          the caller said nothing at all — which a PATCH must read as "leave
+ *          the gate list alone".
+ * @throws {AppError} 404 unknown project · 400 unknown gate name.
+ */
+const resolveDeviceNames = async (groupId, { deviceNames, allDevices } = {}) => {
+  const wantsAll = allDevices === true;
+
+  if (!wantsAll && deviceNames === undefined) return undefined;
+
+  const normalised = String(groupId || '').trim().toUpperCase();
+
+  const project = await Project.findOne({ group_id: normalised })
+    .select('group_id devices')
+    .lean();
+
+  if (!project) throw AppError.notFound(`No project found with group_id "${normalised}".`);
+
+  const active = (project.devices ?? []).filter((device) => device.is_active !== false);
+
+  if (wantsAll) {
+    if (!active.length) {
+      throw AppError.badRequest(
+        `Project ${project.group_id} has no active gates, so "all gates" selects nothing.`,
+        [
+          {
+            field: 'all_devices',
+            message: 'Add or re-enable a gate on the project first.',
+          },
+        ]
+      );
+    }
+
+    return active.map((device) => device.device_name);
+  }
+
+  if (!deviceNames || !deviceNames.length) return [];
+
+  // Stored casing wins, so the list on the record always matches the project.
+  const byLowerName = new Map(
+    active.map((device) => [device.device_name.toLowerCase(), device.device_name])
+  );
+
+  const unknown = [];
+  const resolved = [];
+
+  deviceNames.forEach((name) => {
+    const match = byLowerName.get(String(name).trim().toLowerCase());
+    if (!match) {
+      unknown.push(name);
+    } else if (!resolved.includes(match)) {
+      resolved.push(match);
+    }
+  });
+
+  if (unknown.length) {
+    // A gate that exists but is switched off gets its own message. "No such
+    // gate" would send someone looking for a typo in a name that is spelled
+    // correctly and sitting right there in the project.
+    const deactivated = new Set(
+      (project.devices ?? [])
+        .filter((device) => device.is_active === false)
+        .map((device) => device.device_name.toLowerCase())
+    );
+
+    const switchedOff = unknown.filter((name) => deactivated.has(String(name).trim().toLowerCase()));
+    const missing = unknown.filter((name) => !deactivated.has(String(name).trim().toLowerCase()));
+
+    const quote = (names) => names.map((name) => `"${name}"`).join(', ');
+
+    throw AppError.badRequest(
+      missing.length
+        ? `Project ${project.group_id} has no gate named ${quote(missing)}.`
+        : `Gate ${quote(switchedOff)} is switched off in project ${project.group_id}.`,
+      [
+        {
+          field: 'device_names',
+          message: active.length
+            ? `Valid gates for this project: ${active.map((device) => device.device_name).join(', ')}.`
+            : 'This project has no active gates.',
+        },
+      ]
+    );
+  }
+
+  return resolved;
+};
+
+/**
  * Records that a device just sent an event, adding it to the project if it is
  * not on the list yet.
  *
@@ -798,8 +967,11 @@ module.exports = {
   addDevice,
   updateDevice,
   removeDevice,
+  listDevices,
+  resolveDeviceNames,
   touchDevice,
   findProjectOrFail,
   toProjectRecord,
+  toDeviceRecord,
   assertDashboardAccess,
 };
