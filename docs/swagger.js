@@ -106,8 +106,10 @@ const swaggerSpec = {
           'application_id',
           'device_name',
           'device_unique_key',
+          'group_id',
           'cam_id',
           'transaction_id',
+          'vehicle_number',
           'created_datetime',
         ],
         properties: {
@@ -119,7 +121,13 @@ const swaggerSpec = {
             format: 'uuid',
             example: 'de21ba00-c4e2-474c-9106-b3bcc50e735f',
           },
-          group_id: { type: 'string', nullable: true, example: 'Gate-A' },
+          group_id: {
+            type: 'string',
+            description:
+              'The project this event belongs to. Required. A per-project `pk_…` key still ' +
+              'overrides it — the key decides the scope, this field states the sender’s intent.',
+            example: 'ACME_MALL_PARKING',
+          },
           latitude: { type: 'string', nullable: true, example: '12' },
           longitude: { type: 'string', nullable: true, example: '14' },
           cam_id: { type: 'integer', minimum: 0, example: 3 },
@@ -136,7 +144,16 @@ const swaggerSpec = {
             description: 'Optional. Base64 JPG/PNG, with or without a data-URI prefix.',
             example: '/9j/4AAQSkZJRgABAQAAAQABAAD...',
           },
-          vehicle_number: { type: 'string', nullable: true, example: 'UP32AB1234' },
+          vehicle_number: {
+            type: 'string',
+            minLength: 3,
+            maxLength: 20,
+            description:
+              'Required. Letters, digits and hyphens only; uppercased on the way in. An event ' +
+              'with no plate cannot be matched against the registry, so it is rejected rather ' +
+              'than stored.',
+            example: 'UP32AB1234',
+          },
           vehicle_type: {
             type: 'string',
             nullable: true,
@@ -236,16 +253,10 @@ const swaggerSpec = {
               'that is `registered` but whose list does not name the gate it just arrived at must ' +
               'be treated as unregistered there — that is the whole reason the list is on the ' +
               'feed.\n\n' +
-              'Empty means it is not restricted to any gate; `all_gates` says so explicitly.',
+              'The list is explicit: when an operator picks "all gates" on the dashboard it is ' +
+              'expanded to every active gate by name before it is stored, so this is the complete ' +
+              'set of gates the pass is good at — not a restriction read against a wildcard.',
             example: ['Netru Pro Entry', 'exit1'],
-          },
-          all_gates: {
-            type: 'boolean',
-            description:
-              '`true` when `device_names` is empty — the registration is valid at **every** gate ' +
-              'of the project. Sent because an empty array reads just as easily as "no gates ' +
-              'allowed", and guessing wrong opens or blocks a barrier.',
-            example: false,
           },
         },
       },
@@ -449,6 +460,148 @@ const swaggerSpec = {
           requestId: { type: 'string', format: 'uuid' },
         },
       },
+      // ---- Filter options, shared shape between the two filter endpoints ----
+      // One project a dashboard may filter on, with the gates it can offer for
+      // it. Deactivated projects are listed and flagged rather than hidden —
+      // their history is still readable — while deactivated gates are left out,
+      // because a decommissioned camera has no place in a picker.
+      FilterProject: {
+        type: 'object',
+        properties: {
+          group_id: { type: 'string', example: 'ACME_MALL' },
+          project_name: { type: 'string', example: 'ACME_MALL' },
+          is_active: { type: 'boolean', example: true },
+          device_names: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Active gates on this project.',
+            example: ['entry1', 'exit1'],
+          },
+        },
+      },
+      VehicleLogFilters: {
+        type: 'object',
+        properties: {
+          success: { type: 'boolean', example: true },
+          message: { type: 'string', example: 'Vehicle log filters fetched successfully.' },
+          data: {
+            type: 'object',
+            properties: {
+              projects: {
+                type: 'array',
+                items: { $ref: '#/components/schemas/FilterProject' },
+                description: 'Every project the caller may filter on, with its gates.',
+              },
+              device_names: {
+                type: 'array',
+                items: { type: 'string' },
+                description:
+                  'Every gate across those projects, de-duplicated case-insensitively — what an ' +
+                  '"any project" gate dropdown binds to.',
+                example: ['entry1', 'exit1'],
+              },
+              vehicle_types: {
+                type: 'array',
+                items: { type: 'string', enum: VEHICLE_TYPES },
+                example: VEHICLE_TYPES,
+              },
+              detected_between: {
+                type: 'object',
+                description:
+                  'The span the caller’s detections actually cover, so a date picker can bound ' +
+                  'itself to it. Both ends are null when there are no detections at all — which ' +
+                  'is a different thing from a filter that matched nothing.',
+                properties: {
+                  from: { type: 'string', format: 'date-time', nullable: true },
+                  to: { type: 'string', format: 'date-time', nullable: true },
+                },
+              },
+              paging: {
+                type: 'object',
+                description: 'The limits this API enforces, so the client need not hard-code them.',
+                properties: {
+                  default_limit: { type: 'integer', example: 25 },
+                  max_limit: { type: 'integer', example: 200 },
+                },
+              },
+            },
+          },
+          requestId: { type: 'string', format: 'uuid' },
+        },
+      },
+      VehicleFilters: {
+        type: 'object',
+        properties: {
+          success: { type: 'boolean', example: true },
+          message: { type: 'string', example: 'Vehicle filters fetched successfully.' },
+          data: {
+            type: 'object',
+            properties: {
+              projects: {
+                type: 'array',
+                items: { $ref: '#/components/schemas/FilterProject' },
+              },
+              device_names: {
+                type: 'array',
+                items: { type: 'string' },
+                example: ['entry1', 'exit1'],
+              },
+              statuses: {
+                type: 'array',
+                items: { type: 'string', enum: VEHICLE_TYPES },
+                example: VEHICLE_TYPES,
+              },
+              registered_by: {
+                type: 'array',
+                description:
+                  'Only operators who have actually registered a vehicle in this scope, so the ' +
+                  'dropdown is the handful of names that appear in the table rather than every ' +
+                  'account on the system. Send an `id` back as `registered_by`.',
+                items: {
+                  type: 'object',
+                  properties: {
+                    id: { type: 'string', example: '6a7378aa86d8e0aa080d4f95' },
+                    name: { type: 'string', nullable: true, example: 'Ravi Sharma' },
+                    email: { type: 'string', nullable: true, example: 'ravi@acmemall.com' },
+                  },
+                },
+              },
+              counts: {
+                type: 'object',
+                description:
+                  'The number behind each filter chip. They partition the registry exactly: ' +
+                  '`registered + expired + deactivated = total`, and `unregistered` is the last ' +
+                  'two added up — the same decomposition `status` and `is_active` filter on.',
+                properties: {
+                  total: { type: 'integer', example: 128 },
+                  registered: { type: 'integer', example: 101 },
+                  unregistered: { type: 'integer', example: 27 },
+                  expired: { type: 'integer', example: 22 },
+                  deactivated: { type: 'integer', example: 5 },
+                },
+              },
+              expiring_soon: {
+                type: 'object',
+                description:
+                  'The renewals queue. Send `expiring_in_days=<within_days>` to `GET /api/vehicles` ' +
+                  'to open exactly these rows.',
+                properties: {
+                  within_days: { type: 'integer', example: 30 },
+                  count: { type: 'integer', example: 9 },
+                },
+              },
+              paging: {
+                type: 'object',
+                properties: {
+                  default_limit: { type: 'integer', example: REGISTRY_DEFAULT_LIMIT },
+                  max_limit: { type: 'integer', example: REGISTRY_MAX_LIMIT },
+                },
+              },
+            },
+          },
+          requestId: { type: 'string', format: 'uuid' },
+        },
+      },
       ErrorResponse: {
         type: 'object',
         properties: {
@@ -552,15 +705,15 @@ const swaggerSpec = {
           'Designed to be polled every 5-10 seconds. Reads the **registered-vehicle registry** — ' +
           'not the detection log — so every vehicle the dashboard knows about appears here ' +
           'whether or not a camera has ever seen it.\n\n' +
-          'Each row is `vehicle_number`, `group_id`, `vehicle_type`, `device_names` and ' +
-          '`all_gates`. `vehicle_type` is derived from `valid_till` at read time, so a ' +
+          'Each row is `vehicle_number`, `group_id`, `vehicle_type` and `device_names`. ' +
+          '`vehicle_type` is derived from `valid_till` at read time, so a ' +
           'registration that lapsed a minute ago already reads `unregistered`.\n\n' +
           '**Read the status and the gates together.** A registration can be limited to specific ' +
           'gates, so `vehicle_type: "registered"` means "this pass is current", not "open the ' +
-          'barrier anywhere". At a gate that is not in `device_names` — and when `all_gates` is ' +
-          'false — the vehicle must be treated as unregistered. Prilinesha applies that same rule ' +
+          'barrier anywhere". At a gate that is not in `device_names` the vehicle must be treated ' +
+          'as unregistered. Prilinesha applies that same rule ' +
           'itself when it stamps an incoming event.\n\n' +
-          '**Polling loop:** call once without parameters (returns the newest page), then send the ' +
+          '**Polling loop:** call once without parameters (returns the oldest page), then send the ' +
           '`next_cursor` from every response back as `cursor`. Each row is delivered exactly once; ' +
           'renewing a registration re-sends it with its new status, which is how a poller learns ' +
           'the status changed. While `has_more` is true, poll again immediately rather than ' +
@@ -725,6 +878,46 @@ const swaggerSpec = {
             description: 'Only vehicles added by this user — "what did this operator enter?".',
           },
           {
+            name: 'device_name',
+            in: 'query',
+            required: false,
+            schema: { type: 'string', example: 'entry1' },
+            description:
+              'Registrations that count at this gate, matched case-insensitively — "who may come ' +
+              'through this entrance?". Unrestricted registrations (an empty `device_names`, ' +
+              'meaning every gate in the project) are included, because they are valid there too.',
+          },
+          {
+            name: 'valid_from',
+            in: 'query',
+            required: false,
+            schema: { type: 'string', example: '2026-09-01' },
+            description:
+              'Passes expiring at or after this instant. A window on `valid_till` itself — ' +
+              '"which passes run out this month?" — independent of `status`, which only asks ' +
+              'whether that date has already gone by.',
+          },
+          {
+            name: 'valid_to',
+            in: 'query',
+            required: false,
+            schema: { type: 'string', example: '2026-09-30' },
+            description:
+              'Passes expiring at or before this instant. A bare date covers the **whole** day, ' +
+              'so a pass expiring on the evening of the 30th is included.',
+          },
+          {
+            name: 'expiring_in_days',
+            in: 'query',
+            required: false,
+            schema: { type: 'integer', minimum: 0, maximum: 730, example: 30 },
+            description:
+              'The renewals queue in one parameter: still switched on, and lapsing within this ' +
+              'many days. Excludes the already expired and the deactivated — a suspended vehicle ' +
+              'is waiting on a decision, not on a renewal. `GET /api/vehicles/filters` reports the ' +
+              'count for the default window.',
+          },
+          {
             name: 'page',
             in: 'query',
             required: false,
@@ -748,6 +941,48 @@ const swaggerSpec = {
             content: {
               'application/json': { schema: { $ref: '#/components/schemas/RegisteredVehicleList' } },
             },
+          },
+          400: { $ref: '#/components/responses/BadRequest' },
+          401: { $ref: '#/components/responses/Unauthorized' },
+          403: { $ref: '#/components/responses/Forbidden' },
+          429: { $ref: '#/components/responses/TooManyRequests' },
+          500: { $ref: '#/components/responses/ServerError' },
+        },
+      },
+    },
+
+    '/api/vehicles/filters': {
+      get: {
+        tags: ['Vehicles'],
+        summary: 'Filter options for the registry table',
+        description:
+          'What the filter bar above `GET /api/vehicles` can offer: the caller’s projects and ' +
+          'their gates, the statuses, the operators who have actually registered something, and ' +
+          'the row count behind each chip. Fetch it once when the screen opens and send the ' +
+          'chosen values back to the list endpoint.\n\n' +
+          'Scoped exactly like the table it drives, so a dropdown can never offer a project the ' +
+          'caller would then get a 403 for. `?group_id=` narrows the options **and** the counts ' +
+          'to one project.\n\n' +
+          'The counts partition the registry exactly — `registered + expired + deactivated = ' +
+          'total` — so a chip’s number always matches the table it opens. `expired` and ' +
+          '`deactivated` are reported apart because they are fixed differently: one needs ' +
+          'renewing, the other switching back on.',
+        security: [{ BearerAuth: [] }],
+        parameters: [
+          {
+            name: 'group_id',
+            in: 'query',
+            required: false,
+            schema: { type: 'string', example: 'ACME_MALL' },
+            description:
+              'Narrow the options and counts to one project. Omit for every project the caller ' +
+              'can access.',
+          },
+        ],
+        responses: {
+          200: {
+            description: 'Filter options and counts',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/VehicleFilters' } } },
           },
           400: { $ref: '#/components/responses/BadRequest' },
           401: { $ref: '#/components/responses/Unauthorized' },

@@ -7,6 +7,7 @@ const { PERMISSIONS } = require('../utils/constants');
 const {
   registerVehicleRules,
   listVehiclesRules,
+  vehicleFilterOptionsRules,
   updateVehicleRules,
   setVehicleStatusRules,
   vehicleIdParamRules,
@@ -51,7 +52,9 @@ router.post(
  * GET /api/vehicles
  * Authorization: Bearer <token>
  *
- * Dashboard table: ?group_id= &search= &status=registered|unregistered &page= &limit=
+ * Dashboard table: ?group_id= &search= &status=registered|unregistered &is_active=
+ *                  &registered_by= &device_name= &valid_from= &valid_to=
+ *                  &expiring_in_days= &page= &limit=
  * Without `group_id`, returns every project the caller can see.
  *
  * 200 ok · 400 validation · 401 unauthorized · 403 not your project
@@ -61,6 +64,30 @@ router.get(
   authorize(PERMISSIONS.VEHICLE_READ),
   validate(listVehiclesRules),
   vehicleController.listVehicles
+);
+
+/**
+ * GET /api/vehicles/filters
+ * Authorization: Bearer <token>
+ *
+ * Query: ?group_id=
+ *
+ * What the filter bar above the registry can offer: the caller's projects and
+ * gates, the statuses, the operators who have actually registered something, and
+ * the row count behind each chip. Fetch it once when the screen opens, then send
+ * the chosen values back to `GET /api/vehicles`.
+ *
+ * Registered before `/:id` deliberately — that route validates a Mongo id, so a
+ * filters request arriving after it would be a 400 about a malformed id rather
+ * than this endpoint.
+ *
+ * 200 ok · 400 validation · 401 unauthorized · 403 not your project
+ */
+router.get(
+  '/filters',
+  authorize(PERMISSIONS.VEHICLE_READ),
+  validate(vehicleFilterOptionsRules),
+  vehicleController.getVehicleFilters
 );
 
 /**

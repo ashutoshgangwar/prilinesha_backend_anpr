@@ -698,6 +698,36 @@
               "value": "unregistered",
               "description": "registered | unregistered",
               "disabled": true
+            },
+            {
+              "key": "device_name",
+              "value": "entry1",
+              "description": "who may come through this gate (includes registrations valid at every gate)",
+              "disabled": true
+            },
+            {
+              "key": "expiring_in_days",
+              "value": "30",
+              "description": "the renewals queue: switched on and lapsing within N days",
+              "disabled": true
+            },
+            {
+              "key": "valid_from",
+              "value": "2026-09-01",
+              "description": "passes expiring on or after this date",
+              "disabled": true
+            },
+            {
+              "key": "valid_to",
+              "value": "2026-09-30",
+              "description": "passes expiring on or before this date (whole day)",
+              "disabled": true
+            },
+            {
+              "key": "registered_by",
+              "value": "{{user_id}}",
+              "description": "only vehicles added by this operator",
+              "disabled": true
             }
           ]
         }
@@ -713,6 +743,199 @@
               "pm.test('paginated list', () => {",
               "  pm.expect(body.data).to.be.an('array');",
               "  pm.expect(body.pagination).to.have.property('total');",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Dashboard - vehicle filter options (200)",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          }
+        ],
+        "description": "What the registry's filter bar can offer: the caller's projects and gates, the statuses, the operators who have registered something, and the count behind each chip. Fetch once when the screen opens, then send the chosen values to GET /api/vehicles.",
+        "url": {
+          "raw": "{{base_url}}/api/vehicles/filters",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "vehicles",
+            "filters"
+          ],
+          "query": [
+            {
+              "key": "group_id",
+              "value": "{{group_id}}",
+              "description": "narrow the options and counts to one project",
+              "disabled": true
+            }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 200', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "pm.test('offers projects, gates and statuses', () => {",
+              "  pm.expect(body.data.projects).to.be.an('array');",
+              "  pm.expect(body.data.device_names).to.be.an('array');",
+              "  pm.expect(body.data.statuses).to.eql(['registered', 'unregistered']);",
+              "});",
+              "pm.test('counts partition the registry', () => {",
+              "  const c = body.data.counts;",
+              "  pm.expect(c.registered + c.expired + c.deactivated).to.eql(c.total);",
+              "  pm.expect(c.expired + c.deactivated).to.eql(c.unregistered);",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Dashboard - vehicle logs (200)",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          }
+        ],
+        "description": "The detection log, scoped to the caller's projects. Every filter is optional — no query at all is the default view, newest first.",
+        "url": {
+          "raw": "{{base_url}}/api/logs?page=1&limit=25",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "logs"
+          ],
+          "query": [
+            {
+              "key": "page",
+              "value": "1"
+            },
+            {
+              "key": "limit",
+              "value": "25",
+              "description": "1-200, default 25"
+            },
+            {
+              "key": "vehicle_number",
+              "value": "MH12AB1234",
+              "description": "one exact plate — every crossing by this vehicle",
+              "disabled": true
+            },
+            {
+              "key": "search",
+              "value": "MH12",
+              "description": "partial match on plate, owner or model",
+              "disabled": true
+            },
+            {
+              "key": "vehicle_type",
+              "value": "unregistered",
+              "description": "registered | unregistered, as judged at detection time",
+              "disabled": true
+            },
+            {
+              "key": "device_name",
+              "value": "entry1",
+              "description": "exact gate, case-insensitive",
+              "disabled": true
+            },
+            {
+              "key": "from",
+              "value": "2026-08-01",
+              "description": "from 00:00:00 UTC of this day",
+              "disabled": true
+            },
+            {
+              "key": "to",
+              "value": "2026-08-07",
+              "description": "to 23:59:59 UTC of this day (whole day included)",
+              "disabled": true
+            }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 200', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "pm.test('paginated list', () => {",
+              "  pm.expect(body.data).to.be.an('array');",
+              "  pm.expect(body.pagination).to.have.property('total');",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Dashboard - log filter options (200)",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          }
+        ],
+        "description": "What the log table's filter bar can offer: the caller's projects, their gates, the vehicle types, and the span the detections actually cover.",
+        "url": {
+          "raw": "{{base_url}}/api/logs/filters",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "logs",
+            "filters"
+          ],
+          "query": [
+            {
+              "key": "group_id",
+              "value": "{{group_id}}",
+              "description": "narrow the options to one project",
+              "disabled": true
+            }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 200', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "pm.test('offers projects, gates and types', () => {",
+              "  pm.expect(body.data.projects).to.be.an('array');",
+              "  pm.expect(body.data.device_names).to.be.an('array');",
+              "  pm.expect(body.data.vehicle_types).to.eql(['registered', 'unregistered']);",
+              "});",
+              "pm.test('reports the span the data covers', () => {",
+              "  pm.expect(body.data.detected_between).to.have.property('from');",
+              "  pm.expect(body.data.detected_between).to.have.property('to');",
               "});"
             ]
           }
@@ -865,7 +1088,7 @@
         ],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"application_name\": \"ANPR\",\n  \"application_id\": 1,\n  \"device_name\": \"entry1\",\n  \"device_unique_key\": \"de21ba00-c4e2-474c-9106-b3bcc50e735f\",\n  \"cam_id\": 3,\n  \"transaction_id\": 108,\n  \"event_image\": \"/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==\",\n  \"plate_image\": \"/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==\",\n  \"created_datetime\": \"2025-12-22T12:33:01.744613\"\n}"
+          "raw": "{\n  \"application_name\": \"ANPR\",\n  \"application_id\": 1,\n  \"device_name\": \"entry1\",\n  \"device_unique_key\": \"de21ba00-c4e2-474c-9106-b3bcc50e735f\",\n  \"group_id\": \"{{group_id}}\",\n  \"cam_id\": 3,\n  \"transaction_id\": 108,\n  \"vehicle_number\": \"UP32AB1234\",\n  \"event_image\": \"/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==\",\n  \"plate_image\": \"/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==\",\n  \"created_datetime\": \"2025-12-22T12:33:01.744613\"\n}"
         },
         "url": {
           "raw": "{{base_url}}/api/anpr",

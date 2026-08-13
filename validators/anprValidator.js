@@ -90,16 +90,22 @@ const anprEventRules = [
     .isUUID()
     .withMessage('device_unique_key must be a valid UUID.'),
 
-  // The project this event belongs to. Optional on the wire because a
-  // per-project API key already identifies the project and overrides whatever
-  // is sent here (see services/anprService.js) — it stays accepted so cameras
-  // on the legacy global key can still say which project they are posting for.
+  // The project this event belongs to. Mandatory: every event names the site it
+  // came from, so an event is never stored without a tenant even on the legacy
+  // global key. A per-project API key still overrides it (see
+  // services/anprService.js) — the key is the authority on scope, and this
+  // field is the sender stating its intent.
   body('group_id')
-    .optional({ nullable: true, checkFalsy: true })
+    .exists({ checkNull: true })
+    .withMessage('group_id is required.')
+    .bail()
     .isString()
     .withMessage('group_id must be a string.')
     .bail()
     .trim()
+    .notEmpty()
+    .withMessage('group_id cannot be empty.')
+    .bail()
     .toUpperCase()
     .matches(GROUP_ID_PATTERN)
     .withMessage(
@@ -128,12 +134,20 @@ const anprEventRules = [
     .toInt(),
 
   // ---- Detection ----
+  // Mandatory: an event with no plate cannot be matched against the registry,
+  // so it can never produce a barrier decision or a searchable log row. A
+  // camera that failed to read a plate should not post the event at all.
   body('vehicle_number')
-    .optional({ nullable: true, checkFalsy: true })
+    .exists({ checkNull: true })
+    .withMessage('vehicle_number is required.')
+    .bail()
     .isString()
     .withMessage('vehicle_number must be a string.')
     .bail()
     .trim()
+    .notEmpty()
+    .withMessage('vehicle_number cannot be empty.')
+    .bail()
     .toUpperCase()
     .isLength({ min: 3, max: 20 })
     .withMessage('vehicle_number must be between 3 and 20 characters.')

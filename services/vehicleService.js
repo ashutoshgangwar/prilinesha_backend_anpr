@@ -1,8 +1,13 @@
 const RegisteredVehicle = require('../models/RegisteredVehicle');
+const User = require('../models/User');
 const AppError = require('../utils/AppError');
 const logger = require('../utils/logger');
-const { resolveDeviceNames } = require('./projectService');
-const { REGISTRY_DEFAULT_LIMIT, REGISTRY_MAX_LIMIT } = require('../utils/constants');
+const { resolveDeviceNames, listScopedGates } = require('./projectService');
+const {
+  VEHICLE_TYPES,
+  REGISTRY_DEFAULT_LIMIT,
+  REGISTRY_MAX_LIMIT,
+} = require('../utils/constants');
 
 /**
  * Registered-vehicle registry — the internal dashboard's side of the system.
@@ -18,6 +23,14 @@ const { REGISTRY_DEFAULT_LIMIT, REGISTRY_MAX_LIMIT } = require('../utils/constan
 
 /** Milliseconds in a day, used for the countdown shown in the dashboard. */
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The window the filter-options endpoint reports an "expiring soon" count over,
+ * and the value a dashboard should send back as `expiring_in_days` when the
+ * operator clicks that chip. A month is roughly how much notice a resident needs
+ * to renew; the filter itself takes any number, so this is only the default.
+ */
+const EXPIRING_SOON_DAYS = 30;
 
 /** The fields of a `registered_by` / `updated_by` reference this view exposes. */
 const ACTOR_FIELDS = 'name email';
@@ -246,6 +259,13 @@ const registerVehicle = async (payload, { actor, requestId } = {}) => {
  *                                     "which vehicles have we suspended?" — a question
  *                                     `status` cannot express, since it folds expiry in.
  * @param {string} [params.registeredBy] Only vehicles added by this user id.
+ * @param {string} [params.deviceName] Registrations that count at this gate — which
+ *                                     includes every unrestricted one, since an empty
+ *                                     `device_names` means every gate in the project.
+ * @param {Date}   [params.validFrom]  Passes expiring at or after this instant.
+ * @param {Date}   [params.validTo]    Passes expiring at or before this instant.
+ * @param {number} [params.expiringInDays] Shorthand for the renewals queue: still switched
+ *                                     on, and lapsing within this many days.
  * @param {number} [params.page]       1-based page number (default 1).
  * @param {number} [params.limit]      Rows per page (default 25, max 200).
  * @param {object} scopeFilter     group_id fragment from buildScopeFilter() — the
@@ -258,7 +278,18 @@ const registerVehicle = async (payload, { actor, requestId } = {}) => {
  * @returns {Promise<{ records: object[], pagination: object }>}
  */
 const listVehicles = async (
-  { search, status, isActive, registeredBy, page, limit } = {},
+  {
+    search,
+    status,
+    isActive,
+    registeredBy,
+    deviceName,
+    validFrom,
+    validTo,
+    expiringInDays,
+    page,
+    limit,
+  } = {},
   scopeFilter = {},
   { requestId } = {}
 ) => {
@@ -290,6 +321,45 @@ const listVehicles = async (
   }
 
   if (registeredBy) filter.registered_by = registeredBy;
+
+  // "Who may come through this gate?" — the question a guard on one entrance
+  // asks. An empty `device_names` is the wildcard meaning every gate in the
+  // project, so those registrations count here too: they are valid at this gate,
+  // they simply were not written down gate by gate.
+  if (deviceName) {
+    const gate = new RegExp(`^${escapeRegex(deviceName)}$`, 'i');
+    filter.$and = [
+      ...(filter.$and ?? []),
+      { $or: [{ device_names: { $size: 0 } }, { device_names: gate }] },
+    ];
+  }
+
+  // A window on the expiry date itself — "which passes run out this month?".
+  // Independent of `status`, which only asks whether the date has already
+  // passed.
+  if (validFrom || validTo) {
+    filter.$and = [
+      ...(filter.$and ?? []),
+      {
+        valid_till: {
+          ...(validFrom ? { $gte: validFrom } : {}),
+          ...(validTo ? { $lte: validTo } : {}),
+        },
+      },
+    ];
+  }
+
+  // The renewals queue, as one parameter. Deliberately excludes the already
+  // expired (the window starts at `now`) and the deactivated: a vehicle that is
+  // switched off is not waiting on a renewal, it is waiting on a decision.
+  if (expiringInDays !== undefined && expiringInDays !== null) {
+    const until = new Date(now.getTime() + Number(expiringInDays) * DAY_MS);
+    filter.$and = [
+      ...(filter.$and ?? []),
+      { is_active: { $ne: false } },
+      { valid_till: { $gte: now, $lte: until } },
+    ];
+  }
 
   // Status is derived, never stored: registered means switched on AND in date,
   // so it filters on those two directly. There is no status column that could
@@ -339,6 +409,96 @@ const listVehicles = async (
       has_next: currentPage * pageSize < total,
       has_previous: currentPage > 1,
     },
+  };
+};
+
+/**
+ * Everything the registry's filter bar can offer, for the caller's scope.
+ *
+ * The list endpoint accepts filters; this says which values are worth sending —
+ * the projects and gates that exist, the operators who have actually registered
+ * something, and how many rows sit behind each status chip. A dashboard that
+ * had to discover those by paging the registry would go stale the day a gate is
+ * added or a colleague joins.
+ *
+ * The counts partition the registry exactly: registered + expired + deactivated
+ * = total, with `unregistered` being the last two added up. That is the same
+ * decomposition `status` and `is_active` filter on, so a chip's number always
+ * matches the table it opens.
+ *
+ * @param {object} scopeFilter group_id fragment from buildScopeFilter().
+ * @param {object} [context]
+ * @param {string} [context.requestId]
+ * @returns {Promise<object>}
+ */
+const listVehicleFilters = async (scopeFilter = {}, { requestId } = {}) => {
+  const log = logger.child({ requestId });
+  const now = new Date();
+  const soon = new Date(now.getTime() + EXPIRING_SOON_DAYS * DAY_MS);
+
+  // Same `$ne: false` as everywhere else in this file: rows written before
+  // is_active existed count as active, which is what they are.
+  const switchedOn = { is_active: { $ne: false } };
+
+  const [gates, total, registered, expired, deactivated, expiringSoon, actorIds] =
+    await Promise.all([
+      listScopedGates(scopeFilter),
+      RegisteredVehicle.countDocuments(scopeFilter),
+      RegisteredVehicle.countDocuments({ ...scopeFilter, ...switchedOn, valid_till: { $gte: now } }),
+      RegisteredVehicle.countDocuments({ ...scopeFilter, ...switchedOn, valid_till: { $lt: now } }),
+      RegisteredVehicle.countDocuments({ ...scopeFilter, is_active: false }),
+      RegisteredVehicle.countDocuments({
+        ...scopeFilter,
+        ...switchedOn,
+        valid_till: { $gte: now, $lte: soon },
+      }),
+      // Only operators who have registered something in this scope, so the
+      // dropdown is the handful of people whose names appear in the table rather
+      // than every account on the system.
+      RegisteredVehicle.distinct('registered_by', scopeFilter),
+    ]);
+
+  const ids = actorIds.filter(Boolean);
+
+  const actors = ids.length
+    ? await User.find({ _id: { $in: ids } })
+        .select('name email')
+        .sort({ name: 1 })
+        .lean()
+    : [];
+
+  log.info('Vehicle registry filters listed', {
+    projects: gates.projects.length,
+    devices: gates.device_names.length,
+    total,
+  });
+
+  return {
+    projects: gates.projects,
+    device_names: gates.device_names,
+    statuses: [...VEHICLE_TYPES],
+
+    registered_by: actors.map((actor) => ({
+      id: String(actor._id),
+      name: actor.name ?? null,
+      email: actor.email ?? null,
+    })),
+
+    counts: {
+      total,
+      registered,
+      unregistered: expired + deactivated,
+      // The two reasons a vehicle reads as unregistered, kept apart because the
+      // dashboard shows them as different badges and they are fixed differently:
+      // one needs renewing, the other switching back on.
+      expired,
+      deactivated,
+    },
+
+    // Send `expiring_in_days=<within_days>` to open exactly these rows.
+    expiring_soon: { within_days: EXPIRING_SOON_DAYS, count: expiringSoon },
+
+    paging: { default_limit: REGISTRY_DEFAULT_LIMIT, max_limit: REGISTRY_MAX_LIMIT },
   };
 };
 
@@ -598,6 +758,7 @@ const resolveVehicleStatus = async (vehicleNumber, at, { groupId, deviceName } =
 module.exports = {
   registerVehicle,
   listVehicles,
+  listVehicleFilters,
   getVehicle,
   updateVehicle,
   setVehicleStatus,

@@ -85,18 +85,18 @@ Authorization: Bearer pk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 | `application_id` | integer | ≥ 0 |
 | `device_name` | string | 1–150 characters. Identifies the gate |
 | `device_unique_key` | string | **Must be a valid UUID** |
+| `group_id` | string | 2–50 chars `A-Z 0-9 _ -`, uppercased automatically. A `pk_…` key still overrides it — the key decides the project, this states the sender's intent |
 | `cam_id` | integer | ≥ 0 |
 | `transaction_id` | integer | ≥ 0. **Must be unique per project** — see [Idempotency](#idempotency-and-retries) |
+| `vehicle_number` | string | 3–20 chars, `A-Z 0-9 -` only. Uppercased automatically. An event with no plate cannot be matched against the registry, so do not post one |
 | `created_datetime` | string | ISO 8601. No offset is interpreted as **UTC** |
 
 #### Optional
 
 | Field | Type | Rule |
 |---|---|---|
-| `group_id` | string | 2–50 chars `A-Z 0-9 _ -`. Ignored when using a `pk_…` key |
 | `latitude` | string | Numeric string, −90 to 90 |
 | `longitude` | string | Numeric string, −180 to 180 |
-| `vehicle_number` | string | 3–20 chars, `A-Z 0-9 -` only. Uppercased automatically |
 | `vehicle_class` | string | `bus` \| `car` \| `bike` \| `truck` \| `auto` |
 | `color` | string | `White` \| `Gray` \| `Yellow` \| `Red` \| `Green` \| `Blue` \| `Black` (case-sensitive) |
 | `vehicle_type` | string | `registered` \| `unregistered` — **advisory only**, see below |
@@ -113,7 +113,8 @@ Authorization: Bearer pk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 | `plate_image` | string | Base64-encoded image, ≤ 10 MB decoded |
 
 Omitted, `null` and `""` are all treated as "not supplied" for optional fields.
-An event with no `vehicle_number` and no images is still accepted and stored.
+A required field sent as `null` or `""` is a `400`, not a "not supplied". An
+event with no images is still accepted and stored.
 
 > **`vehicle_type` in the request is not authoritative.** Prilinesha looks the plate
 > up in that project's registry and decides `registered` / `unregistered` itself,
@@ -220,15 +221,13 @@ Authorization: Bearer pk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
       "vehicle_number": "DL3CC9876",
       "group_id": "ACME_MALL_PARKING",
       "vehicle_type": "registered",
-      "device_names": [],
-      "all_gates": true
+      "device_names": ["Netru Pro Entry", "exit1"]
     },
     {
       "vehicle_number": "DL5CX1222",
       "group_id": "ACME_MALL_PARKING",
       "vehicle_type": "registered",
-      "device_names": ["Netru Pro Entry"],
-      "all_gates": false
+      "device_names": ["Netru Pro Entry"]
     }
   ],
   "requestId": "a618d237-88f8-4d4b-bd47-62713898ed3c"
@@ -245,24 +244,28 @@ Authorization: Bearer pk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 | `data[].vehicle_number` | The plate, uppercased |
 | `data[].group_id` | The project this vehicle is registered under |
 | `data[].vehicle_type` | `registered` or `unregistered` |
-| `data[].device_names` | The gates this registration is good for. Names exactly as the cameras report them |
-| `data[].all_gates` | `true` when `device_names` is empty — valid at **every** gate of the project |
+| `data[].device_names` | The **complete, explicit** list of gates this registration is good for. Names exactly as the cameras report them |
 
-Each row contains **exactly these five fields**. Owner names and phone numbers
+Each row contains **exactly these four fields**. Owner names and phone numbers
 are held on the Prilinesha side and are never sent.
 
 > **`vehicle_type` is not a barrier decision on its own.** A registration can be
 > limited to specific gates, so `registered` means "this pass is current", not
-> "open anywhere". At a gate whose `device_name` is not in `device_names` — and
-> where `all_gates` is `false` — treat the vehicle as **unregistered**:
+> "open anywhere". At a gate whose `device_name` is not in `device_names`, treat
+> the vehicle as **unregistered**:
 >
 > ```
 > allowed = vehicle_type == "registered"
->           and (all_gates or device_name in device_names)
+>           and device_name in device_names
 > ```
 >
-> Match the gate name case-insensitively; Prilinesha applies exactly this rule
+> Match the gate name case-insensitively; Prilinesha applies the same rule
 > when it stamps an incoming event, so the two sides agree.
+
+> **There is no wildcard to interpret.** When a dashboard operator picks "all
+> gates", it is expanded to every active gate of the project **by name** before
+> being stored — so `device_names` is always the literal set of gates, and there
+> is no `all_gates` flag on the feed.
 
 `vehicle_type` is computed when you read it, from the registration's expiry date.
 A registration that lapsed a minute ago already reads `unregistered`; nothing has
@@ -402,6 +405,8 @@ customer's data.
 ## 6. Integration checklist
 
 - [ ] API key stored in configuration, not in source
+- [ ] `group_id` sent on every event
+- [ ] Events with an unread plate are not posted — `vehicle_number` is required
 - [ ] `device_unique_key` is a real UUID, stable per camera
 - [ ] `transaction_id` unique per project and monotonically increasing
 - [ ] `created_datetime` in ISO 8601 (UTC assumed when no offset is given)
@@ -429,6 +434,7 @@ curl -X POST "$BASE/api" \
     "application_id": 1,
     "device_name": "entry1",
     "device_unique_key": "3f9a1c22-7b6e-4d55-9f0a-2c8b41d7e610",
+    "group_id": "ACME_MALL_PARKING",
     "cam_id": 101,
     "transaction_id": 1,
     "vehicle_number": "DL8CAF1234",

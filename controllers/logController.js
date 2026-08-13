@@ -13,6 +13,7 @@ const { buildScopeFilter } = require('../middleware/auth');
 const listVehicleLogs = asyncHandler(async (req, res) => {
   const {
     search,
+    vehicle_number: vehicleNumber,
     vehicle_type: vehicleType,
     device_name: deviceName,
     from,
@@ -27,7 +28,7 @@ const listVehicleLogs = asyncHandler(async (req, res) => {
   const scopeFilter = buildScopeFilter(req, groupId);
 
   const { records, pagination } = await logService.listVehicleLogs(
-    { search, vehicleType, deviceName, from, to, page, limit },
+    { search, vehicleNumber, vehicleType, deviceName, from, to, page, limit },
     scopeFilter,
     { requestId: req.id }
   );
@@ -42,4 +43,25 @@ const listVehicleLogs = asyncHandler(async (req, res) => {
   });
 });
 
-module.exports = { listVehicleLogs };
+/**
+ * GET /api/logs/filters
+ * The values the log table's filter bar can offer — projects, gates, statuses
+ * and the span the data actually covers.
+ *
+ * Scoped exactly like `GET /api/logs`, so a dropdown can never offer a project
+ * the caller would then get a 403 for.
+ */
+const getVehicleLogFilters = asyncHandler(async (req, res) => {
+  const scopeFilter = buildScopeFilter(req, req.query.group_id);
+
+  const filters = await logService.listVehicleLogFilters(scopeFilter, { requestId: req.id });
+
+  res.status(200).json({
+    success: true,
+    message: 'Vehicle log filters fetched successfully.',
+    data: filters,
+    requestId: req.id,
+  });
+});
+
+module.exports = { listVehicleLogs, getVehicleLogFilters };

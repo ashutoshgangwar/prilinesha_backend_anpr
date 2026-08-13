@@ -654,6 +654,15 @@ const logPaths = {
             'three columns this table shows.',
         },
         {
+          name: 'vehicle_number',
+          in: 'query',
+          schema: { type: 'string', example: 'MH12AB1234' },
+          description:
+            'One exact plate — every crossing by this vehicle. Uppercased on the way in, and ' +
+            'matched as an equality on an indexed field rather than the regex `search` runs, so ' +
+            'prefer this when you know the plate.',
+        },
+        {
           name: 'vehicle_type',
           in: 'query',
           schema: { type: 'string', enum: ['registered', 'unregistered'] },
@@ -689,6 +698,38 @@ const logPaths = {
       ],
       responses: {
         200: { description: 'Detections', content: json('#/components/schemas/VehicleLogList') },
+        400: errors[400],
+        401: errors[401],
+        403: { description: 'group_id is outside your scope', content: json('#/components/schemas/ErrorResponse') },
+        500: errors[500],
+      },
+    },
+  },
+
+  '/api/logs/filters': {
+    get: {
+      tags: ['Logs'],
+      summary: 'Filter options for the detection-log table',
+      description:
+        'What the filter bar above `GET /api/logs` can offer: the caller’s projects, their gates, ' +
+        'the vehicle types, and the span the detections actually cover. Fetch it once when the ' +
+        'screen opens and send the chosen values back to the list endpoint.\n\n' +
+        'Scoped exactly like the table it drives, so a dropdown can never offer a project the ' +
+        'caller would then get a 403 for. `?group_id=` narrows the options to one project.\n\n' +
+        'Gates come from the project registry rather than from the events, so a camera that has ' +
+        'not seen anything yet is still offered — and a gate list is read from one small document ' +
+        'per project instead of a `distinct` over every detection ever ingested.',
+      security: [{ BearerAuth: [] }],
+      parameters: [
+        {
+          name: 'group_id',
+          in: 'query',
+          schema: { type: 'string', example: 'ACME_MALL' },
+          description: 'Narrow the options to one project. Omit for every project the caller can see.',
+        },
+      ],
+      responses: {
+        200: { description: 'Filter options', content: json('#/components/schemas/VehicleLogFilters') },
         400: errors[400],
         401: errors[401],
         403: { description: 'group_id is outside your scope', content: json('#/components/schemas/ErrorResponse') },

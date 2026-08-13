@@ -219,9 +219,10 @@ A plate is **registered** only while a registration *in that project* covers it.
 | `PATCH /api/users/{id}/role` · `/status` | Bearer JWT | super admin |
 | `POST /api/users/{id}/reset-password` | Bearer JWT | super admin |
 | `POST /api/vehicles` · `GET /api/vehicles` | Bearer JWT | scoped to the caller |
+| `GET /api/vehicles/filters` | Bearer JWT | scoped to the caller |
 | `GET·PATCH·DELETE /api/vehicles/{id}` | Bearer JWT | scoped to the caller |
 | `PATCH /api/vehicles/{id}/status` | Bearer JWT | scoped to the caller |
-| `GET /api/logs` | Bearer JWT | scoped to the caller |
+| `GET /api/logs` · `GET /api/logs/filters` | Bearer JWT | scoped to the caller |
 | `POST /api/anpr` · `GET /api/anpr/feed` | API key | camera / Intozi |
 
 Full request and response schemas are in Swagger at `/api-docs`.
@@ -682,8 +683,25 @@ curl -H "Authorization: Bearer $TOKEN" \
 | `status` | – | Effective status: `registered` (switched on **and** in date) \| `unregistered` (expired **or** deactivated) |
 | `is_active` | – | The manual switch alone. `false` = what you have suspended |
 | `registered_by` | – | User id — "what did this operator enter?" |
+| `device_name` | – | Registrations that count at this gate, case-insensitive. Includes the unrestricted ones (empty `device_names` = every gate) |
+| `valid_from` | – | Passes expiring on or after this date |
+| `valid_to` | – | Passes expiring on or before this date. A bare date covers the whole day |
+| `expiring_in_days` | – | Integer 0–730. The renewals queue: switched on **and** lapsing within N days |
 | `page` | `1` | Integer ≥ 1 |
 | `limit` | `25` | Integer 1–200 |
+
+Filters intersect, so a contradiction returns nothing rather than the wrong rows —
+`?status=registered&is_active=false` is empty by construction, not by accident.
+
+`device_name` answers "who may come through this entrance?", which is not the same question as
+"whose registration names this gate": a registration with an empty `device_names` is the wildcard
+meaning every gate in the project, so it is valid there too and is included.
+
+`valid_from`/`valid_to` filter the **expiry date itself** — "which passes run out this month?" —
+which is independent of `status`, and that only asks whether that date has already gone by.
+`expiring_in_days` is the renewals queue as one parameter: it excludes the already expired (the
+window starts now) and the deactivated, because a suspended vehicle is waiting on a decision, not on
+a renewal.
 
 ```json
 {
@@ -718,6 +736,57 @@ curl -H "Authorization: Bearer $TOKEN" \
 `status` and `days_remaining` are **computed on every read** — never stored. A row cannot drift out
 of sync with reality, and nothing needs a scheduled job to expire it. `days_remaining` goes negative
 once lapsed, so the UI can render "expired 185 days ago" directly.
+
+---
+
+### `GET /api/vehicles/filters`
+
+What the filter bar above that table can offer. Fetch it once when the screen opens, then send the
+chosen values back to `GET /api/vehicles`. Without it a dashboard would have to hard-code every
+customer's gate names, or page the registry to discover them — and both go stale the day a gate is
+added.
+
+Scoped exactly like the table it drives, so a dropdown can never offer a project the caller would
+then get a `403` for. `?group_id=` narrows the options **and** the counts to one project.
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" "http://localhost:5050/api/vehicles/filters"
+```
+
+```json
+{
+  "success": true,
+  "message": "Vehicle filters fetched successfully.",
+  "data": {
+    "projects": [
+      { "group_id": "ACME_MALL", "project_name": "ACME_MALL", "is_active": true, "device_names": ["entry1", "exit1"] }
+    ],
+    "device_names": ["entry1", "exit1"],
+    "statuses": ["registered", "unregistered"],
+    "registered_by": [
+      { "id": "6a7378aa86d8e0aa080d4f95", "name": "Ravi Sharma", "email": "ravi@acmemall.com" }
+    ],
+    "counts": { "total": 128, "registered": 101, "unregistered": 27, "expired": 22, "deactivated": 5 },
+    "expiring_soon": { "within_days": 30, "count": 9 },
+    "paging": { "default_limit": 25, "max_limit": 200 }
+  },
+  "requestId": "540629b8-3baf-4065-8964-db33188a4986"
+}
+```
+
+The counts partition the registry exactly — `registered + expired + deactivated = total`, and
+`unregistered` is the last two added up — which is the same decomposition `status` and `is_active`
+filter on. A chip's number therefore always matches the table it opens. `expired` and `deactivated`
+are reported apart because they are fixed differently: one needs renewing, the other switching back
+on.
+
+`registered_by` lists only operators who have actually registered something in this scope, so the
+dropdown is the handful of names that appear in the table rather than every account on the system.
+`expiring_soon.count` is what `?expiring_in_days=30` returns.
+
+Gates come from the project registry, not from a `distinct` over the registry rows: a gate list is
+one small document per project, a `distinct` is a scan, and a gate nobody has registered at yet is
+still a gate worth offering.
 
 ---
 
@@ -847,6 +916,7 @@ curl -H "Authorization: Bearer $TOKEN" \
 | --- | --- | --- |
 | `group_id` | – | Narrow to one project. `403` if it is outside your scope. |
 | `search` | – | Partial, case-insensitive match on vehicle number, owner name **or** vehicle model |
+| `vehicle_number` | – | One exact plate — every crossing by this vehicle |
 | `vehicle_type` | – | `registered` \| `unregistered` |
 | `device_name` | – | Exact gate, matched case-insensitively |
 | `from` | – | `YYYY-MM-DD` (from 00:00:00 UTC) or ISO 8601 datetime |
@@ -908,10 +978,53 @@ join on every query to serve a rare case. Search the registry itself via `GET /a
 **`vehicle_type`** is the status as judged *when the vehicle was seen*, read from the event — so a
 registration expiring today cannot rewrite last week's rows.
 
+**`vehicle_number`** is the "follow one vehicle" filter, and it is deliberately not `search`: the
+plate is uppercased on the way in and matched as an equality, so it walks
+`idx_group_vehicle_number_created` instead of regex-scanning three columns. Use `search` when you
+have a fragment, `vehicle_number` when you have the plate.
+
 Rows are sorted by `detected_at` (when the camera saw it) descending, with `_id` breaking ties so no
 row can appear on two pages. The response is built field by field rather than by hiding columns, so
 the contact details stored on an event — `contact_no`, `email`, `driver_name` — never appear here,
 and a column added to `VehicleLog` later cannot leak by default.
+
+---
+
+### `GET /api/logs/filters`
+
+What the filter bar above the log table can offer — the same idea as
+`GET /api/vehicles/filters`, for the detections. Fetch it once when the screen opens, then send the
+chosen values back to `GET /api/logs`. Scoped identically to the table, so a dropdown can never
+offer a project the caller would then get a `403` for.
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" "http://localhost:5050/api/logs/filters"
+```
+
+```json
+{
+  "success": true,
+  "message": "Vehicle log filters fetched successfully.",
+  "data": {
+    "projects": [
+      { "group_id": "ACME_MALL", "project_name": "ACME_MALL", "is_active": true, "device_names": ["entry1", "exit1"] }
+    ],
+    "device_names": ["entry1", "exit1"],
+    "vehicle_types": ["registered", "unregistered"],
+    "detected_between": { "from": "2026-07-02T06:11:40.000Z", "to": "2026-08-11T09:58:12.000Z" },
+    "paging": { "default_limit": 25, "max_limit": 200 }
+  },
+  "requestId": "540629b8-3baf-4065-8964-db33188a4986"
+}
+```
+
+`detected_between` is the real extent of the caller's data, so a date picker can bound itself to it.
+Both ends are `null` when there are no detections at all — which is a different thing from a filter
+that matched nothing, and the UI should be able to tell those apart.
+
+Gates come from the project registry rather than from the events themselves: a camera that has not
+seen anything yet is still a gate worth offering, and reading one small document per project beats a
+`distinct` over every detection ever ingested.
 
 ### `GET /health`
 
@@ -1062,7 +1175,8 @@ curl -s -H "Authorization: Bearer $CUST" "http://localhost:5050/api/vehicles" | 
 │   ├── auth.js                 # signup, login, me, change-password
 │   ├── users.js                # User admin + project assignment (super admin)
 │   ├── projects.js             # Projects (group_id), gates, API-key rotation
-│   ├── vehicles.js             # POST /api/vehicles, GET /api/vehicles (dashboard)
+│   ├── vehicles.js             # GET/POST /api/vehicles, /filters, /{id} (dashboard)
+│   ├── logs.js                 # GET /api/logs, /api/logs/filters (dashboard)
 │   ├── anpr.js                 # POST /api/anpr, GET /api/anpr/feed (cameras)
 │   └── health.js               # GET /health, /health/ready
 ├── controllers/                # Thin HTTP adapters
@@ -1070,18 +1184,22 @@ curl -s -H "Authorization: Bearer $CUST" "http://localhost:5050/api/vehicles" | 
 │   ├── userController.js
 │   ├── projectController.js
 │   ├── vehicleController.js
+│   ├── logController.js
 │   └── anprController.js
 ├── services/
 │   ├── authService.js          # Signup, login, profile, password change
 │   ├── userService.js          # User admin; assignProjects IS the access grant
 │   ├── projectService.js       # Projects, gates, API keys, device auto-registration
 │   ├── vehicleService.js       # Registry CRUD + resolveVehicleStatus (registered/unregistered)
+│   ├── logService.js           # Detection-log table + its filter options
 │   └── anprService.js          # Ingestion (dedupe → images → insert → rollback) + Intozi feed
 ├── validators/                 # express-validator rules
 │   ├── authValidator.js        # Password policy lives here, stated once
 │   ├── userValidator.js
 │   ├── projectValidator.js     # GROUP_ID_PATTERN / DEVICE_NAME_PATTERN — reused everywhere
+│   ├── dateRules.js            # from/to windows — one reading of "a bare date", shared
 │   ├── vehicleValidator.js
+│   ├── logValidator.js
 │   └── anprValidator.js
 ├── middleware/
 │   ├── auth.js                 # JWT verify → authorize(permission) → project scoping

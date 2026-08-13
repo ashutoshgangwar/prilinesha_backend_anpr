@@ -175,6 +175,12 @@ const createAnprEvent = async (payload, { project, requestId } = {}) => {
  * stamps an incoming event (see resolveVehicleStatus), but a poller acting on
  * the feed has no way to apply it without the list.
  *
+ * The list goes out exactly as stored — no "valid everywhere" flag is derived
+ * here. The dashboard resolves the operator's gate selection when the vehicle
+ * is registered (`all_devices: true` is expanded to every active gate by name,
+ * see resolveDeviceNames), so what a consumer receives is already the explicit
+ * set of gates and needs no second rule to interpret it.
+ *
  * @param {object} record Lean RegisteredVehicle document.
  * @param {Date} now      Instant to judge `valid_till` against.
  */
@@ -189,11 +195,11 @@ const toFeedRecord = (record, now) => {
     // flipping a flag, and a registration switched off on the dashboard reads as
     // unregistered here on the very next poll.
     vehicle_type: record.valid_till ? statusOf(record, now) : DEFAULT_VEHICLE_TYPE,
-    // The gates this registration is good for. Empty means it is not restricted
-    // to any, which is why the flag below spells that out rather than leaving a
-    // consumer to infer it from a `[]`.
+    // The gates this registration is good for, exactly as the dashboard stored
+    // them. The frontend resolves "all gates" into the full list at
+    // registration time, so this is the complete set — not a restriction to be
+    // read against a wildcard.
     device_names: [...deviceNames],
-    all_gates: deviceNames.length === 0,
   };
 };
 

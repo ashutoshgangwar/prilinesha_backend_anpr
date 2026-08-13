@@ -2,6 +2,7 @@ const { body, param, query } = require('express-validator');
 
 const { VEHICLE_TYPES, REGISTRY_MAX_LIMIT } = require('../utils/constants');
 const { GROUP_ID_PATTERN, DEVICE_NAME_PATTERN } = require('./projectValidator');
+const { dateRangeRules } = require('./dateRules');
 
 /**
  * Make and model, as free text — "Swift Dzire", "Activa 6G".
@@ -250,16 +251,19 @@ const setVehicleStatusRules = [
 
 const vehicleIdParamRules = [vehicleIdParamRule];
 
+/** Narrows to one project. Entitlement is buildScopeFilter's call, not this one's. */
+const groupIdQueryRule = query('group_id')
+  .optional({ nullable: true, checkFalsy: true })
+  .isString()
+  .withMessage('group_id must be a string.')
+  .bail()
+  .trim()
+  .toUpperCase()
+  .matches(GROUP_ID_PATTERN)
+  .withMessage('group_id is not a valid project identifier (e.g. ACME_MALL).');
+
 const listVehiclesRules = [
-  query('group_id')
-    .optional({ nullable: true, checkFalsy: true })
-    .isString()
-    .withMessage('group_id must be a string.')
-    .bail()
-    .trim()
-    .toUpperCase()
-    .matches(GROUP_ID_PATTERN)
-    .withMessage('group_id is not a valid project identifier (e.g. ACME_MALL).'),
+  groupIdQueryRule,
 
   query('search')
     .optional({ nullable: true, checkFalsy: true })
@@ -294,6 +298,34 @@ const listVehiclesRules = [
     .isMongoId()
     .withMessage('registered_by must be a valid user id.'),
 
+  // "Who may come through this gate?" — matched case-insensitively, and
+  // unrestricted registrations (an empty device_names, meaning every gate) count
+  // as valid at it.
+  query('device_name')
+    .optional({ nullable: true, checkFalsy: true })
+    .isString()
+    .withMessage('device_name must be a string.')
+    .bail()
+    .trim()
+    .matches(DEVICE_NAME_PATTERN)
+    .withMessage(
+      'device_name must be 1-50 characters of letters, digits, dots, underscores or hyphens.'
+    ),
+
+  // A window on `valid_till` — when the pass runs out, not when the vehicle was
+  // added. `valid_to=2026-09-30` covers the whole of the 30th, so a pass expiring
+  // that evening is included.
+  ...dateRangeRules('valid_from', 'valid_to'),
+
+  // The renewals queue in one parameter: switched on, and lapsing within N days.
+  // Capped at two years because beyond that it selects the whole registry, which
+  // the unfiltered list already does more cheaply.
+  query('expiring_in_days')
+    .optional({ nullable: true, checkFalsy: false })
+    .isInt({ min: 0, max: 730 })
+    .withMessage('expiring_in_days must be an integer between 0 and 730.')
+    .toInt(),
+
   query('page')
     .optional({ nullable: true, checkFalsy: true })
     .isInt({ min: 1 })
@@ -307,9 +339,16 @@ const listVehiclesRules = [
     .toInt(),
 ];
 
+/**
+ * `GET /api/vehicles/filters` takes the one parameter that changes its answer:
+ * narrowing the options and the counts to a single project, as the table does.
+ */
+const vehicleFilterOptionsRules = [groupIdQueryRule];
+
 module.exports = {
   registerVehicleRules,
   listVehiclesRules,
+  vehicleFilterOptionsRules,
   updateVehicleRules,
   setVehicleStatusRules,
   vehicleIdParamRules,

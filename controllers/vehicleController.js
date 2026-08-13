@@ -40,6 +40,10 @@ const listVehicles = asyncHandler(async (req, res) => {
     status,
     is_active: isActive,
     registered_by: registeredBy,
+    device_name: deviceName,
+    valid_from: validFrom,
+    valid_to: validTo,
+    expiring_in_days: expiringInDays,
     page,
     limit,
     group_id: groupId,
@@ -48,7 +52,18 @@ const listVehicles = asyncHandler(async (req, res) => {
   const scopeFilter = buildScopeFilter(req, groupId);
 
   const { records, pagination } = await vehicleService.listVehicles(
-    { search, status, isActive, registeredBy, page, limit },
+    {
+      search,
+      status,
+      isActive,
+      registeredBy,
+      deviceName,
+      validFrom,
+      validTo,
+      expiringInDays,
+      page,
+      limit,
+    },
     scopeFilter,
     { requestId: req.id }
   );
@@ -59,6 +74,27 @@ const listVehicles = asyncHandler(async (req, res) => {
     count: records.length,
     pagination,
     data: records,
+    requestId: req.id,
+  });
+});
+
+/**
+ * GET /api/vehicles/filters
+ * The values the registry's filter bar can offer — projects, gates, statuses,
+ * the operators who have registered something, and the count behind each chip.
+ *
+ * Scoped exactly like `GET /api/vehicles`, so a dropdown can never offer a
+ * project the caller would then get a 403 for.
+ */
+const getVehicleFilters = asyncHandler(async (req, res) => {
+  const scopeFilter = buildScopeFilter(req, req.query.group_id);
+
+  const filters = await vehicleService.listVehicleFilters(scopeFilter, { requestId: req.id });
+
+  res.status(200).json({
+    success: true,
+    message: 'Vehicle filters fetched successfully.',
+    data: filters,
     requestId: req.id,
   });
 });
@@ -154,6 +190,7 @@ const deleteVehicle = asyncHandler(async (req, res) => {
 module.exports = {
   registerVehicle,
   listVehicles,
+  getVehicleFilters,
   getVehicle,
   updateVehicle,
   setVehicleStatus,

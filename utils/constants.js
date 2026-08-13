@@ -23,20 +23,15 @@ const DEFAULT_VEHICLE_TYPE = 'unregistered';
  * "registered" without saying where. The barrier decision needs both. It is the
  * gate names only — no labels, no directions, nothing else off the project.
  *
- * `all_gates` says what an empty `device_names` means. `[]` is the wildcard
- * internally, but "empty list" reads just as easily as "no gates allowed" to a
- * consumer working from the JSON, and guessing wrong opens or blocks a barrier.
+ * The list is disclosed as stored, with no derived "valid at every gate" flag
+ * alongside it: the dashboard resolves the operator's selection into an explicit
+ * list when the vehicle is registered, so the feed states gates rather than
+ * asking a consumer to interpret a wildcard.
  *
  * Kept as a list so a test can assert the response shape exactly, rather than
  * trusting that nothing was added to the projection by accident.
  */
-const FEED_DISCLOSED_FIELDS = [
-  'vehicle_number',
-  'group_id',
-  'vehicle_type',
-  'device_names',
-  'all_gates',
-];
+const FEED_DISCLOSED_FIELDS = ['vehicle_number', 'group_id', 'vehicle_type', 'device_names'];
 
 /** Paging limits for the Intozi polling feed. */
 const FEED_DEFAULT_LIMIT = 100;

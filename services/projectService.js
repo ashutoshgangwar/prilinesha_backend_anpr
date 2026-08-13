@@ -780,6 +780,59 @@ const listDevices = async (groupId, { includeInactive = false } = {}) => {
 };
 
 /**
+ * The projects and gates a caller may filter by — the shared half of every
+ * filter-options endpoint (`GET /api/logs/filters`, `GET /api/vehicles/filters`).
+ *
+ * Read from the project registry rather than by running `distinct()` over the
+ * event or registry collections: the gate list is a small, indexed document per
+ * project, while a distinct over millions of detections is a scan to produce a
+ * dropdown. It also stays honest on a quiet site — a gate that has not been
+ * through yet is still a gate an operator can filter on, and a `distinct` would
+ * simply omit it.
+ *
+ * Deactivated *projects* are included, flagged rather than hidden: their history
+ * is still readable and still worth narrowing to. Deactivated *gates* are left
+ * out, because a decommissioned camera has no place in a picker.
+ *
+ * @param {object} scopeFilter group_id fragment from buildScopeFilter().
+ * @returns {Promise<{projects: object[], device_names: string[]}>} The projects
+ *          in scope with their gates, plus the flattened, de-duplicated gate
+ *          list a single "any project" dropdown binds to.
+ */
+const listScopedGates = async (scopeFilter = {}) => {
+  const projects = await Project.find(scopeFilter)
+    .select('group_id project_name is_active devices')
+    .sort({ group_id: 1 })
+    .lean();
+
+  const byName = (a, b) => a.localeCompare(b);
+
+  const records = projects.map((project) => ({
+    group_id: project.group_id,
+    project_name: project.project_name,
+    is_active: project.is_active !== false,
+    device_names: (project.devices ?? [])
+      .filter((device) => device.is_active !== false)
+      .map((device) => device.device_name)
+      .sort(byName),
+  }));
+
+  // Two projects can legitimately both have a gate called "entry1", and the
+  // filter matches by name case-insensitively across whatever is in scope — so
+  // the flat list is de-duplicated on the lowercased name, keeping the first
+  // project's casing to show.
+  const seen = new Map();
+  records.forEach((project) => {
+    project.device_names.forEach((name) => {
+      const key = name.toLowerCase();
+      if (!seen.has(key)) seen.set(key, name);
+    });
+  });
+
+  return { projects: records, device_names: [...seen.values()].sort(byName) };
+};
+
+/**
  * Turns a gate selection from the vehicle form into the list to store.
  *
  * Three inputs, and they mean different things:
@@ -968,6 +1021,7 @@ module.exports = {
   updateDevice,
   removeDevice,
   listDevices,
+  listScopedGates,
   resolveDeviceNames,
   touchDevice,
   findProjectOrFail,

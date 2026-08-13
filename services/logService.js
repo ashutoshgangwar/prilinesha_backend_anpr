@@ -1,7 +1,8 @@
 const VehicleLog = require('../models/VehicleLog');
 const RegisteredVehicle = require('../models/RegisteredVehicle');
 const logger = require('../utils/logger');
-const { LOG_DEFAULT_LIMIT, LOG_MAX_LIMIT } = require('../utils/constants');
+const { listScopedGates } = require('./projectService');
+const { VEHICLE_TYPES, LOG_DEFAULT_LIMIT, LOG_MAX_LIMIT } = require('../utils/constants');
 
 /**
  * The detection log, as the internal dashboard reads it.
@@ -121,7 +122,8 @@ const toLogRecord = (record, registry) => {
  * appear on two pages when several events share a timestamp.
  *
  * @param {object} [params]
- * @param {string} [params.search]       Partial, case-insensitive match on plate, owner or model.
+ * @param {string} [params.search]        Partial, case-insensitive match on plate, owner or model.
+ * @param {string} [params.vehicleNumber] One exact plate — every crossing by this vehicle.
  * @param {string} [params.vehicleType]  'registered' | 'unregistered'.
  * @param {string} [params.deviceName]   Exact gate, matched case-insensitively.
  * @param {Date}   [params.from]         Only detections at or after this instant.
@@ -138,7 +140,7 @@ const toLogRecord = (record, registry) => {
  * @returns {Promise<{ records: object[], pagination: object }>}
  */
 const listVehicleLogs = async (
-  { search, vehicleType, deviceName, from, to, page, limit } = {},
+  { search, vehicleNumber, vehicleType, deviceName, from, to, page, limit } = {},
   scopeFilter = {},
   { requestId } = {}
 ) => {
@@ -148,6 +150,12 @@ const listVehicleLogs = async (
   const currentPage = Math.max(Number(page) || 1, 1);
 
   const filter = { ...scopeFilter };
+
+  // The whole history of one vehicle, which is the question an operator asks
+  // most often. Separate from `search` on purpose: this is an equality match on
+  // an uppercased plate, so it walks idx_group_vehicle_number_created instead of
+  // regex-scanning three columns.
+  if (vehicleNumber) filter.vehicle_number = vehicleNumber;
 
   if (vehicleType) filter.vehicle_type = vehicleType;
 
@@ -210,4 +218,57 @@ const listVehicleLogs = async (
   };
 };
 
-module.exports = { listVehicleLogs, toLogRecord };
+/**
+ * Everything the detection-log filter bar can offer, for the caller's scope.
+ *
+ * The list endpoint accepts filters; this says which values are worth sending.
+ * Without it a dashboard has to either hard-code the gate names of every
+ * customer or page through the log to discover them, and both go stale the day
+ * a camera is added.
+ *
+ * Scoped exactly like the table it drives, so the dropdowns can never offer a
+ * project the caller would get a 403 for. `detected_between` is the real extent
+ * of the data, so a date picker can bound itself to it and an empty project can
+ * say "no detections yet" instead of showing an empty table.
+ *
+ * @param {object} scopeFilter group_id fragment from buildScopeFilter().
+ * @param {object} [context]
+ * @param {string} [context.requestId]
+ * @returns {Promise<object>}
+ */
+const listVehicleLogFilters = async (scopeFilter = {}, { requestId } = {}) => {
+  const log = logger.child({ requestId });
+
+  // Two one-document reads rather than an aggregation: both walk the same
+  // (group_id, created_datetime) index the table itself sorts on, in each
+  // direction, so this stays cheap however large the log grows.
+  const [{ projects, device_names: deviceNames }, oldest, newest] = await Promise.all([
+    listScopedGates(scopeFilter),
+    VehicleLog.findOne(scopeFilter).select('created_datetime').sort({ created_datetime: 1 }).lean(),
+    VehicleLog.findOne(scopeFilter).select('created_datetime').sort({ created_datetime: -1 }).lean(),
+  ]);
+
+  log.info('Vehicle log filters listed', {
+    projects: projects.length,
+    devices: deviceNames.length,
+  });
+
+  return {
+    projects,
+    device_names: deviceNames,
+    vehicle_types: [...VEHICLE_TYPES],
+
+    // Null on both ends when the caller has no detections at all — which is a
+    // different thing from a filter that matched nothing, and the UI should be
+    // able to tell them apart.
+    detected_between: {
+      from: oldest?.created_datetime ?? null,
+      to: newest?.created_datetime ?? null,
+    },
+
+    // So the client does not have to hard-code the numbers the API enforces.
+    paging: { default_limit: LOG_DEFAULT_LIMIT, max_limit: LOG_MAX_LIMIT },
+  };
+};
+
+module.exports = { listVehicleLogs, listVehicleLogFilters, toLogRecord };
