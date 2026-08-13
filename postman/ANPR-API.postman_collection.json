@@ -943,6 +943,301 @@
       ]
     },
     {
+      "name": "Analytics - filter options (200)",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          }
+        ],
+        "description": "What the reporting filter bar can offer: projects, gates with the direction each will be counted as, the granularities, and the ready-made date chips in quick_ranges. Fetch this when the screen opens.",
+        "url": {
+          "raw": "{{base_url}}/api/analytics/filters",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "analytics",
+            "filters"
+          ],
+          "query": [
+            {
+              "key": "group_id",
+              "value": "{{group_id}}",
+              "description": "narrow the options to one project",
+              "disabled": true
+            },
+            {
+              "key": "timezone",
+              "value": "Asia/Kolkata",
+              "description": "IANA zone the quick ranges are resolved in",
+              "disabled": true
+            }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 200', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "pm.test('offers projects, gates and granularities', () => {",
+              "  pm.expect(body.data.projects).to.be.an('array');",
+              "  pm.expect(body.data.devices).to.be.an('array');",
+              "  pm.expect(body.data.granularities).to.eql(['hour', 'day', 'week', 'month']);",
+              "  pm.expect(body.data.directions).to.eql(['entry', 'exit']);",
+              "});",
+              "pm.test('ships the date chips a chart needs', () => {",
+              "  pm.expect(body.data.quick_ranges).to.be.an('array').that.is.not.empty;",
+              "  pm.expect(body.data.quick_ranges[0]).to.have.property('from');",
+              "});",
+              "pm.test('every gate says where its direction came from', () => {",
+              "  body.data.devices.forEach((device) => {",
+              "    pm.expect(['configured', 'inferred_from_name', 'unknown']).to.include(device.direction_source);",
+              "  });",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Analytics - summary tiles (200)",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          }
+        ],
+        "description": "The dashboard tiles. registered_vehicles is a standing count of the register (never day-wise, ignores from/to); traffic is entries/exits inside the window; today is the same for the local day in progress.",
+        "url": {
+          "raw": "{{base_url}}/api/analytics/summary?group_id={{group_id}}",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "analytics",
+            "summary"
+          ],
+          "query": [
+            {
+              "key": "group_id",
+              "value": "{{group_id}}",
+              "description": "omit for every project the caller can see"
+            },
+            {
+              "key": "from",
+              "value": "2026-08-01",
+              "description": "bare date = whole local day",
+              "disabled": true
+            },
+            {
+              "key": "to",
+              "value": "2026-08-13",
+              "description": "inclusive",
+              "disabled": true
+            },
+            {
+              "key": "timezone",
+              "value": "Asia/Kolkata",
+              "description": "defaults to Asia/Kolkata",
+              "disabled": true
+            },
+            {
+              "key": "direction",
+              "value": "entry",
+              "description": "entry | exit",
+              "disabled": true
+            },
+            {
+              "key": "device_name",
+              "value": "Exit_Gate_1",
+              "description": "one exact gate",
+              "disabled": true
+            },
+            {
+              "key": "vehicle_type",
+              "value": "registered",
+              "description": "registered | unregistered",
+              "disabled": true
+            }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 200', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "pm.test('reports the standing registry total', () => {",
+              "  pm.expect(body.data.registered_vehicles).to.have.property('total');",
+              "  pm.expect(body.data.registered_vehicles.total).to.be.a('number');",
+              "});",
+              "pm.test('reports entries and exits', () => {",
+              "  pm.expect(body.data.traffic).to.have.property('entries');",
+              "  pm.expect(body.data.traffic).to.have.property('exits');",
+              "  pm.expect(body.data.today).to.have.property('date');",
+              "});",
+              "pm.test('entries + exits + unattributed accounts for the total', () => {",
+              "  const t = body.data.traffic;",
+              "  pm.expect(t.entries + t.exits + t.unattributed).to.eql(t.total);",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Analytics - traffic series for the chart (200)",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          }
+        ],
+        "description": "One point per bucket, ordered and zero-filled, so a chart plots bucket on the x-axis with entries and exits as the two series. granularity is hour | day | week | month.",
+        "url": {
+          "raw": "{{base_url}}/api/analytics/traffic?group_id={{group_id}}&granularity=day",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "analytics",
+            "traffic"
+          ],
+          "query": [
+            {
+              "key": "group_id",
+              "value": "{{group_id}}",
+              "description": "omit for every project the caller can see"
+            },
+            {
+              "key": "granularity",
+              "value": "day",
+              "description": "hour | day | week | month"
+            },
+            {
+              "key": "from",
+              "value": "2026-08-01",
+              "description": "defaults to 30 days back at granularity=day",
+              "disabled": true
+            },
+            {
+              "key": "to",
+              "value": "2026-08-13",
+              "description": "inclusive; defaults to end of today",
+              "disabled": true
+            },
+            {
+              "key": "timezone",
+              "value": "Asia/Kolkata",
+              "description": "defaults to Asia/Kolkata",
+              "disabled": true
+            },
+            {
+              "key": "direction",
+              "value": "exit",
+              "description": "count only entry gates, or only exit gates",
+              "disabled": true
+            }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 200', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "pm.test('returns an ordered, zero-filled series', () => {",
+              "  pm.expect(body.data.series).to.be.an('array').that.is.not.empty;",
+              "  const first = body.data.series[0];",
+              "  ['bucket', 'starts_at', 'entries', 'exits', 'total'].forEach((key) => {",
+              "    pm.expect(first).to.have.property(key);",
+              "  });",
+              "  const stamps = body.data.series.map((point) => new Date(point.starts_at).getTime());",
+              "  pm.expect(stamps).to.eql(stamps.slice().sort((a, b) => a - b), 'buckets are in order');",
+              "});",
+              "pm.test('the series adds up to the totals', () => {",
+              "  const summed = body.data.series.reduce((n, point) => n + point.total, 0);",
+              "  pm.expect(summed).to.eql(body.data.totals.total);",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Analytics - window too wide is rejected (400)",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          }
+        ],
+        "description": "Hourly buckets over six years would be tens of thousands of points. The API refuses and says to coarsen the granularity rather than building the array.",
+        "url": {
+          "raw": "{{base_url}}/api/analytics/traffic?granularity=hour&from=2020-01-01&to=2026-08-13",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "analytics",
+            "traffic"
+          ],
+          "query": [
+            {
+              "key": "granularity",
+              "value": "hour"
+            },
+            {
+              "key": "from",
+              "value": "2020-01-01"
+            },
+            {
+              "key": "to",
+              "value": "2026-08-13"
+            }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 400', () => pm.response.to.have.status(400));",
+              "pm.test('says how to narrow it', () => {",
+              "  const body = pm.response.json();",
+              "  pm.expect(body.message).to.include('points at granularity');",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
       "name": "Dashboard - expired vehicle (201, status unregistered)",
       "request": {
         "method": "POST",

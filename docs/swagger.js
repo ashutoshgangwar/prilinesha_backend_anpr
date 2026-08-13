@@ -13,6 +13,7 @@ const {
 
 const { authPaths, projectPaths, userPaths, logPaths } = require('./swaggerAuthPaths');
 const { authSchemas } = require('./swaggerAuthSchemas');
+const { analyticsPaths, analyticsSchemas } = require('./swaggerAnalyticsPaths');
 
 /** OpenAPI 3.0 description of the public surface, served at /api-docs. */
 /** The `{id}` path parameter shared by the single-registration routes. */
@@ -73,6 +74,10 @@ const swaggerSpec = {
     { name: 'Users', description: 'Dashboard user administration — super admin only' },
     { name: 'Vehicles', description: 'Registered-vehicle registry, scoped per project' },
     { name: 'Logs', description: 'Detection log for the internal dashboard, scoped to the caller' },
+    {
+      name: 'Analytics',
+      description: 'Registry totals and entry/exit counts over time — the dashboard tiles and charts',
+    },
     { name: 'ANPR', description: 'Event ingestion and the Intozi polling feed' },
     { name: 'System', description: 'Health probes' },
   ],
@@ -99,6 +104,7 @@ const swaggerSpec = {
     },
     schemas: {
       ...authSchemas({ ROLE_VALUES, PERMISSIONS, LIST_MAX_LIMIT }),
+      ...analyticsSchemas,
       AnprEvent: {
         type: 'object',
         required: [
@@ -663,6 +669,7 @@ const swaggerSpec = {
     ...projectPaths,
     ...userPaths,
     ...logPaths,
+    ...analyticsPaths,
 
     // Cameras / Intozi: API-key authenticated, scoped to the key's project.
     '/api': {

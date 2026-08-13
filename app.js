@@ -10,6 +10,7 @@ const swaggerSpec = require('./docs/swagger');
 const anprRoutes = require('./routes/anpr');
 const vehicleRoutes = require('./routes/vehicles');
 const logRoutes = require('./routes/logs');
+const analyticsRoutes = require('./routes/analytics');
 const authRoutes = require('./routes/auth');
 const userRoutes = require('./routes/users');
 const projectRoutes = require('./routes/projects');
@@ -86,6 +87,7 @@ app.use('/api/users', userRoutes);
 app.use('/api/projects', projectRoutes);
 app.use('/api/vehicles', vehicleRoutes);
 app.use('/api/logs', logRoutes);
+app.use('/api/analytics', analyticsRoutes);
 
 // Cameras / Intozi: API-key authenticated, scoped to the key's project.
 // Mounted at the API root, so Intozi posts to `/api` and polls `/api/feed`.
@@ -104,6 +106,7 @@ app.get('/', (_req, res) => {
       projects: '/api/projects',
       vehicles: '/api/vehicles',
       logs: '/api/logs',
+      analytics: '/api/analytics',
       anpr: '/api',
       anprFeed: '/api/feed',
     },

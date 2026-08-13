@@ -53,6 +53,49 @@ const LIST_MAX_LIMIT = 100;
 const LOG_DEFAULT_LIMIT = 25;
 const LOG_MAX_LIMIT = 200;
 
+// ---------------------------------------------------------------------------
+// Reporting (dashboard charts and totals)
+// ---------------------------------------------------------------------------
+
+/**
+ * Which way traffic flows through a gate, as stored on Project.devices[].direction.
+ *
+ * This is what turns a detection into an entry or an exit: the reports read the
+ * direction configured on the gate the event names. `both` is a real answer for a
+ * single-lane gate, and an honest one — it says the event cannot be attributed to
+ * either side, so those detections are counted separately rather than guessed at.
+ */
+const GATE_DIRECTIONS = ['entry', 'exit', 'both'];
+
+/** Time buckets the traffic report can group by. */
+const ANALYTICS_GRANULARITIES = ['hour', 'day', 'week', 'month'];
+
+/** Per day, because that is the question a site operator actually asks. */
+const ANALYTICS_DEFAULT_GRANULARITY = 'day';
+
+/**
+ * How far back a report looks when the caller names no window, per granularity.
+ * Each lands on a chart that is readable without scrolling: two days of hours,
+ * a month of days, a quarter of weeks, a year of months.
+ */
+const ANALYTICS_DEFAULT_SPAN_DAYS = { hour: 2, day: 30, week: 84, month: 365 };
+
+/**
+ * Ceiling on points in one response. A chart with more than this is unreadable
+ * anyway, and the limit is what stops `granularity=hour&from=2020-01-01` from
+ * building a 50,000-point array. Exceeding it is a 400 that says how to narrow.
+ */
+const ANALYTICS_MAX_BUCKETS = 750;
+
+/**
+ * The timezone the reports bucket by unless the caller names another.
+ *
+ * Deliberately not UTC: every site running this is in IST, and a vehicle
+ * entering at 04:00 local belongs to that morning's count, not to the previous
+ * day's. Callers elsewhere send `?timezone=` with any IANA name.
+ */
+const DEFAULT_REPORT_TIMEZONE = 'Asia/Kolkata';
+
 /**
  * What kind of site a project is. Chosen by the super admin when the project is
  * created, and fixed thereafter in practice — a parking lot does not become a
@@ -211,6 +254,12 @@ module.exports = {
   LIST_MAX_LIMIT,
   LOG_DEFAULT_LIMIT,
   LOG_MAX_LIMIT,
+  GATE_DIRECTIONS,
+  ANALYTICS_GRANULARITIES,
+  ANALYTICS_DEFAULT_GRANULARITY,
+  ANALYTICS_DEFAULT_SPAN_DAYS,
+  ANALYTICS_MAX_BUCKETS,
+  DEFAULT_REPORT_TIMEZONE,
   PROJECT_TYPES,
   MIN_DEVICES_PER_PROJECT,
   MAX_DEVICES_PER_PROJECT,
