@@ -38,6 +38,7 @@ const listVehicles = asyncHandler(async (req, res) => {
   const {
     search,
     status,
+    occupant_type: occupantType,
     is_active: isActive,
     registered_by: registeredBy,
     device_name: deviceName,
@@ -55,6 +56,7 @@ const listVehicles = asyncHandler(async (req, res) => {
     {
       search,
       status,
+      occupantType,
       isActive,
       registeredBy,
       deviceName,

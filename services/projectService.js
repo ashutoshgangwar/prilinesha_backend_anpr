@@ -13,6 +13,9 @@ const {
   MAX_DEVICES_PER_PROJECT,
   ROLES,
   roleForProjectType,
+  PROJECT_TYPE_OCCUPANTS,
+  VISITOR_OCCUPANT_TYPE,
+  occupantTypeForProjectType,
 } = require('../utils/constants');
 
 /**
@@ -949,6 +952,89 @@ const resolveDeviceNames = async (groupId, { deviceNames, allDevices } = {}) => 
 };
 
 /**
+ * Decides what to store in `occupant_type`, given the project's own type.
+ *
+ * The rule the dashboard is built on: a `society` has residents, a `parking`
+ * project has tenants, and neither has the other's. So the caller normally sends
+ * nothing at all and gets the right word filled in from the project — one less
+ * field on the form, and one less way for a society to end up full of "tenants".
+ *
+ * Sending it explicitly is still allowed, and is checked rather than trusted:
+ * the wrong kind for this site is a 400 naming the right one. `visitor` gets its
+ * own message, because somebody sending it has the right idea and the wrong
+ * endpoint — a visit is a window with a host, which is `POST /api/visitors`.
+ *
+ * A project created before `project_type` existed has no answer to give, so an
+ * omitted field stores null there rather than guessing at one.
+ *
+ * @param {string} groupId
+ * @param {string} [occupantType] What the caller asked for, if anything.
+ * @returns {Promise<string|null|undefined>} The value to store, or `undefined`
+ *          when nothing was sent and the project has no type — which a PATCH
+ *          must read as "leave it alone".
+ * @throws {AppError} 404 unknown project · 400 wrong kind for this site type.
+ */
+const resolveOccupantType = async (groupId, occupantType) => {
+  const requested = occupantType ? String(occupantType).trim().toLowerCase() : null;
+
+  const normalised = String(groupId || '').trim().toUpperCase();
+
+  const project = await Project.findOne({ group_id: normalised })
+    .select('group_id project_type')
+    .lean();
+
+  if (!project) throw AppError.notFound(`No project found with group_id "${normalised}".`);
+
+  const expected = occupantTypeForProjectType(project.project_type);
+
+  if (!requested) return expected ?? undefined;
+
+  if (requested === VISITOR_OCCUPANT_TYPE) {
+    throw AppError.badRequest('A visitor is not registered here.', [
+      {
+        field: 'occupant_type',
+        message:
+          'Use POST /api/visitors to issue a visitor pass — it carries the host and the window ' +
+          'the vehicle is allowed in for, which a registration has nowhere to put.',
+      },
+    ]);
+  }
+
+  // A project with no type cannot contradict anything, so an explicit choice is
+  // taken at face value there rather than refused on the strength of a field
+  // nobody ever filled in.
+  if (expected && requested !== expected) {
+    throw AppError.badRequest(
+      `Project ${project.group_id} is a ${project.project_type}, so its occupants are ${expected}s.`,
+      [
+        {
+          field: 'occupant_type',
+          message: `Send "${expected}", or omit occupant_type and it is filled in from the project.`,
+        },
+      ]
+    );
+  }
+
+  return requested;
+};
+
+/**
+ * The occupant kind a project's own forms should offer.
+ *
+ * @param {string|null} projectType
+ * @returns {string[]} `['resident', 'visitor']` for a society, `['tenant',
+ *          'visitor']` for a parking project, and every kind for a project whose
+ *          type was never set — there is nothing there to narrow by.
+ */
+const occupantTypesForProject = (projectType) => {
+  const permanent = occupantTypeForProjectType(projectType);
+
+  return permanent
+    ? [permanent, VISITOR_OCCUPANT_TYPE]
+    : [...Object.values(PROJECT_TYPE_OCCUPANTS), VISITOR_OCCUPANT_TYPE];
+};
+
+/**
  * Records that a device just sent an event, adding it to the project if it is
  * not on the list yet.
  *
@@ -1023,6 +1109,8 @@ module.exports = {
   listDevices,
   listScopedGates,
   resolveDeviceNames,
+  resolveOccupantType,
+  occupantTypesForProject,
   touchDevice,
   findProjectOrFail,
   toProjectRecord,

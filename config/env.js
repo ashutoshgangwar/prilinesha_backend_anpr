@@ -110,6 +110,28 @@ const config = {
   AUTH_RATE_LIMIT_WINDOW_MS: asInt('AUTH_RATE_LIMIT_WINDOW_MS', 15 * 60 * 1000, { min: 1000 }),
   AUTH_RATE_LIMIT_MAX: asInt('AUTH_RATE_LIMIT_MAX', 10, { min: 1 }),
 
+  // ---- Access-change feed (GET /api/feed) ----
+
+  // How often the sweeper looks for passes whose window has just opened or
+  // closed. Expiry is only ever visible to Intozi once this has run, so this
+  // interval is the worst-case lag between a pass lapsing and the barrier being
+  // told. 60s is well inside a 5-10s polling loop's tolerance and costs two
+  // indexed queries a minute.
+  ACCESS_SWEEP_INTERVAL_MS: asInt('ACCESS_SWEEP_INTERVAL_MS', 60 * 1000, { min: 5000 }),
+
+  // Escape hatch for a second process (a worker, a migration run) that must not
+  // also sweep. The API keeps serving the feed either way; nothing else depends
+  // on it being on in this particular process.
+  ACCESS_SWEEP_ENABLED: optional('ACCESS_SWEEP_ENABLED', 'true') === 'true',
+
+  // How long a change stays readable. This is the real limit on how far behind
+  // a consumer may fall: an event pruned before Intozi read it is an event
+  // Intozi will never see, which for a revocation means a vehicle that keeps
+  // getting in. 30 days is far beyond any plausible outage, and a cursor older
+  // than this is reported back as needing a re-seed rather than being served a
+  // page with a silent hole in it. 0 disables pruning entirely.
+  ACCESS_CHANGE_RETENTION_DAYS: asInt('ACCESS_CHANGE_RETENTION_DAYS', 30, { min: 0, max: 3650 }),
+
   UPLOAD_DIR: path.resolve(process.cwd(), optional('UPLOAD_DIR', './uploads')),
   UPLOAD_PUBLIC_PATH: optional('UPLOAD_PUBLIC_PATH', '/uploads'),
   SERVE_UPLOADS: optional('SERVE_UPLOADS', 'true') === 'true',

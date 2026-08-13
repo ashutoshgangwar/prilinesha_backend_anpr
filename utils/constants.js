@@ -31,11 +31,87 @@ const DEFAULT_VEHICLE_TYPE = 'unregistered';
  * Kept as a list so a test can assert the response shape exactly, rather than
  * trusting that nothing was added to the projection by accident.
  */
-const FEED_DISCLOSED_FIELDS = ['vehicle_number', 'group_id', 'vehicle_type', 'device_names'];
+const FEED_DISCLOSED_FIELDS = [
+  'vehicle_number',
+  'group_id',
+  'vehicle_type',
+  'device_names',
+  // Added with the change feed. The other four say what the vehicle's access
+  // *is*; this says what just happened to it, which is the one thing a consumer
+  // applying changes to a local list cannot infer — specifically, DELETED, where
+  // the underlying row no longer exists to be described at all.
+  //
+  // Deliberately not accompanied by `changed_at`, `source`, or the source row's
+  // id: none of them changes a barrier decision, and the internal id of a
+  // registration is nobody's business outside this system. The cursor carries
+  // the ordering, opaquely.
+  'event_type',
+];
 
 /** Paging limits for the Intozi polling feed. */
 const FEED_DEFAULT_LIMIT = 100;
 const FEED_MAX_LIMIT = 1000;
+
+// ---------------------------------------------------------------------------
+// Access-change log (the Intozi feed's source)
+// ---------------------------------------------------------------------------
+
+/**
+ * What happened to a vehicle's access, as recorded in the change log.
+ *
+ * The feed is a stream of these, not a list of vehicles: Intozi keeps its own
+ * allow-list and applies each event to it. `vehicle_type` on the row still says
+ * whether the vehicle ends up allowed in, so a consumer that only understands
+ * registered/unregistered keeps working; `event_type` says *why*, which is what
+ * distinguishes "this row is gone" from "this row is currently out of date".
+ *
+ *   CREATED   — first time this vehicle became known to the project.
+ *   UPDATED   — its access details changed and it is still on the list. Also how
+ *               a future-dated visitor pass reports that its window just opened.
+ *   SUSPENDED — a registration was switched off from the dashboard.
+ *   REVOKED   — a visitor pass was withdrawn before its window closed.
+ *   EXPIRED   — the clock passed valid_till. Emitted by the sweeper, because
+ *               time passing writes nothing to the row (see jobs/accessSweeper).
+ *   DELETED   — the row was removed outright. A tombstone: the record no longer
+ *               exists, so this event is the only thing that can ever tell
+ *               Intozi to drop the plate.
+ *
+ * SUSPENDED and REVOKED are the same instruction to a barrier ("stop letting it
+ * in") and are kept apart because the two collections mean different things by
+ * it, and an operator reading the log needs to see which one happened.
+ */
+const ACCESS_EVENT_TYPES = {
+  CREATED: 'CREATED',
+  UPDATED: 'UPDATED',
+  REVOKED: 'REVOKED',
+  SUSPENDED: 'SUSPENDED',
+  EXPIRED: 'EXPIRED',
+  DELETED: 'DELETED',
+};
+
+const ACCESS_EVENT_VALUES = Object.values(ACCESS_EVENT_TYPES);
+
+/** Which access list a change came from. Internal — never disclosed on the feed. */
+const ACCESS_CHANGE_SOURCES = {
+  REGISTRATION: 'registration',
+  VISITOR: 'visitor',
+};
+
+const ACCESS_CHANGE_SOURCE_VALUES = Object.values(ACCESS_CHANGE_SOURCES);
+
+/**
+ * How many rows one sweeper pass claims at a time, and how many passes it will
+ * make in a single tick.
+ *
+ * The product is the ceiling on work per tick: with several lakh vehicles, the
+ * first sweep after a long outage could otherwise try to expire tens of
+ * thousands of rows in one go and hold the event loop. Whatever is left is
+ * picked up on the next tick, and nothing is lost — the query is driven by an
+ * index on (marker, valid_till), so the remaining rows are exactly as cheap to
+ * find next time.
+ */
+const EXPIRY_SWEEP_BATCH_SIZE = 500;
+const EXPIRY_SWEEP_MAX_BATCHES = 20;
 
 /** Page sizes for the dashboard's registered-vehicle table. */
 const REGISTRY_DEFAULT_LIMIT = 25;
@@ -105,6 +181,61 @@ const DEFAULT_REPORT_TIMEZONE = 'Asia/Kolkata';
 const PROJECT_TYPES = ['parking', 'society'];
 
 /**
+ * Who a vehicle belongs to at a site — the answer to "why is this plate allowed
+ * in?", which the two site types phrase differently:
+ *
+ *   resident — lives in the society. The permanent occupant of a `society`.
+ *   tenant   — rents a bay or a unit in the parking project. Same idea, the word
+ *              the customer actually uses.
+ *   visitor  — here today for somebody else, at both kinds of site. Stored in
+ *              its own collection (models/Visitor.js), never on the registry:
+ *              a visitor pass is a window with a host attached, and folding it
+ *              into a permanent registration would mean a row that is sometimes
+ *              a person who lives here and sometimes one who does not.
+ */
+const OCCUPANT_TYPES = ['resident', 'tenant', 'visitor'];
+
+/** The visitor kind, kept as a constant so nothing has to spell it. */
+const VISITOR_OCCUPANT_TYPE = 'visitor';
+
+/**
+ * The permanent occupant kind each site type has. This is the whole rule: a
+ * society has residents, a parking project has tenants, and neither has the
+ * other's. `POST /api/vehicles` fills the field in from the project when the
+ * caller omits it, and rejects the wrong one outright.
+ */
+const PROJECT_TYPE_OCCUPANTS = {
+  society: 'resident',
+  parking: 'tenant',
+};
+
+/** Occupant kinds a registration (not a visitor pass) may hold. */
+const RESIDENT_OCCUPANT_TYPES = Object.values(PROJECT_TYPE_OCCUPANTS);
+
+/**
+ * @param {string|null} projectType One of PROJECT_TYPES.
+ * @returns {string|null} 'resident' | 'tenant', or null for a project whose type
+ *          was never set — those predate the field and must keep saving.
+ */
+const occupantTypeForProjectType = (projectType) =>
+  PROJECT_TYPE_OCCUPANTS[String(projectType ?? '').trim().toLowerCase()] ?? null;
+
+/**
+ * How long a visitor pass may run for.
+ *
+ * A visitor is somebody here for an afternoon, an evening, a week of work at a
+ * flat — the window is the point of the record, and it is what makes the plate
+ * read as unregistered again once it closes. The ceiling stops "visitor" being
+ * used to grant a year of access without going through the registry, where a
+ * permanent occupant belongs and where renewals are actually reviewed.
+ */
+const MAX_VISITOR_PASS_DAYS = 30;
+
+/** Page sizes for the dashboard's visitor table — same shape as the registry. */
+const VISITOR_DEFAULT_LIMIT = 25;
+const VISITOR_MAX_LIMIT = 200;
+
+/**
  * How many gates a single project may have.
  *
  * A project with no devices cannot receive anything, so one is the floor and it
@@ -164,6 +295,13 @@ const PERMISSIONS = {
   VEHICLE_READ: 'vehicle:read',
   VEHICLE_WRITE: 'vehicle:write',
 
+  // Visitor passes. Separate from the registry permissions on purpose: letting
+  // the gate desk issue an afternoon's pass is a much smaller grant than letting
+  // them add a permanent resident, and a role that should only do the first is
+  // now expressible without a code change.
+  VISITOR_READ: 'visitor:read',
+  VISITOR_WRITE: 'visitor:write',
+
   // ANPR detection events
   EVENT_READ: 'event:read',
 };
@@ -180,6 +318,8 @@ const ROLE_PERMISSIONS = {
     PERMISSIONS.PROJECT_DEVICE_MANAGE,
     PERMISSIONS.VEHICLE_READ,
     PERMISSIONS.VEHICLE_WRITE,
+    PERMISSIONS.VISITOR_READ,
+    PERMISSIONS.VISITOR_WRITE,
     PERMISSIONS.EVENT_READ,
   ],
 };
@@ -248,6 +388,12 @@ module.exports = {
   FEED_DISCLOSED_FIELDS,
   FEED_DEFAULT_LIMIT,
   FEED_MAX_LIMIT,
+  ACCESS_EVENT_TYPES,
+  ACCESS_EVENT_VALUES,
+  ACCESS_CHANGE_SOURCES,
+  ACCESS_CHANGE_SOURCE_VALUES,
+  EXPIRY_SWEEP_BATCH_SIZE,
+  EXPIRY_SWEEP_MAX_BATCHES,
   REGISTRY_DEFAULT_LIMIT,
   REGISTRY_MAX_LIMIT,
   LIST_DEFAULT_LIMIT,
@@ -261,6 +407,14 @@ module.exports = {
   ANALYTICS_MAX_BUCKETS,
   DEFAULT_REPORT_TIMEZONE,
   PROJECT_TYPES,
+  OCCUPANT_TYPES,
+  VISITOR_OCCUPANT_TYPE,
+  PROJECT_TYPE_OCCUPANTS,
+  RESIDENT_OCCUPANT_TYPES,
+  occupantTypeForProjectType,
+  MAX_VISITOR_PASS_DAYS,
+  VISITOR_DEFAULT_LIMIT,
+  VISITOR_MAX_LIMIT,
   MIN_DEVICES_PER_PROJECT,
   MAX_DEVICES_PER_PROJECT,
   ROLES,

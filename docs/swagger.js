@@ -9,11 +9,13 @@ const {
   LIST_MAX_LIMIT,
   ROLE_VALUES,
   PERMISSIONS,
+  RESIDENT_OCCUPANT_TYPES,
 } = require('../utils/constants');
 
 const { authPaths, projectPaths, userPaths, logPaths } = require('./swaggerAuthPaths');
 const { authSchemas } = require('./swaggerAuthSchemas');
 const { analyticsPaths, analyticsSchemas } = require('./swaggerAnalyticsPaths');
+const { visitorPaths, visitorSchemas } = require('./swaggerVisitorPaths');
 
 /** OpenAPI 3.0 description of the public surface, served at /api-docs. */
 /** The `{id}` path parameter shared by the single-registration routes. */
@@ -63,8 +65,12 @@ const swaggerSpec = {
       '2. Creates the project with its gates (`POST /api/projects`) → returns the Intozi `api_key` **once**.',
       '3. Customer signs up (`POST /api/auth/signup`) — an account with no data access yet.',
       '4. Super admin assigns them the project (`PUT /api/users/{id}/projects`) — access is live immediately.',
-      '5. Customer registers vehicles (`POST /api/vehicles`).',
-      '6. Intozi posts events (`POST /api/anpr`) and polls the feed (`GET /api/anpr/feed`).',
+      '5. Customer registers vehicles (`POST /api/vehicles`) — `resident` in a society, `tenant` in',
+      '   a parking project, filled in from the project’s own type.',
+      '6. Their gate desk issues visitor passes (`POST /api/visitors`) — one plate, one host, and',
+      '   the window it is allowed in for, after which the plate reads as unregistered again.',
+      '7. Intozi posts events (`POST /api/anpr`) and polls the feed (`GET /api/anpr/feed`), which',
+      '   serves both lists as one.',
     ].join('\n'),
   },
   servers: [{ url: '/', description: 'Current host' }],
@@ -73,6 +79,12 @@ const swaggerSpec = {
     { name: 'Projects', description: 'Projects (group_id) and their gates (device_name)' },
     { name: 'Users', description: 'Dashboard user administration — super admin only' },
     { name: 'Vehicles', description: 'Registered-vehicle registry, scoped per project' },
+    {
+      name: 'Visitors',
+      description:
+        'Visitor passes — one plate, one host, one window. The temporary half of a project’s ' +
+        'access list, at both societies and parking projects.',
+    },
     { name: 'Logs', description: 'Detection log for the internal dashboard, scoped to the caller' },
     {
       name: 'Analytics',
@@ -105,6 +117,7 @@ const swaggerSpec = {
     schemas: {
       ...authSchemas({ ROLE_VALUES, PERMISSIONS, LIST_MAX_LIMIT }),
       ...analyticsSchemas,
+      ...visitorSchemas,
       AnprEvent: {
         type: 'object',
         required: [
@@ -231,8 +244,9 @@ const swaggerSpec = {
       VehicleFeedRecord: {
         type: 'object',
         description:
-          'One registered vehicle on the Intozi feed. Only the fields below are disclosed; the ' +
-          'owner name and phone number on the underlying record stay internal.',
+          'One **change** on the Intozi feed — from a registration or a visitor pass, disclosed ' +
+          'identically. Only the fields below go out; the owner’s name and phone, a pass’s host ' +
+          'and purpose, the dates, and every internal id stay on the dashboard.',
         properties: {
           vehicle_number: { type: 'string', nullable: true, example: 'UP32AB1234' },
           group_id: {
@@ -247,9 +261,9 @@ const swaggerSpec = {
             type: 'string',
             enum: VEHICLE_TYPES,
             description:
-              'Derived from `valid_till` and the manual switch at read time — `unregistered` once ' +
-              'the registration has expired or has been switched off. Never stored, so it cannot ' +
-              'go stale.\n\n' +
+              'The access state this change leaves the vehicle in. `unregistered` on every event ' +
+              'that takes access away — SUSPENDED, REVOKED, EXPIRED and DELETED — so a consumer ' +
+              'can act on this field alone without interpreting `event_type` at all.\n\n' +
               '**Not a barrier decision on its own** — read it together with `device_names`.',
             example: 'registered',
           },
@@ -263,8 +277,18 @@ const swaggerSpec = {
               'feed.\n\n' +
               'The list is explicit: when an operator picks "all gates" on the dashboard it is ' +
               'expanded to every active gate by name before it is stored, so this is the complete ' +
-              'set of gates the pass is good at — not a restriction read against a wildcard.',
+              'set of gates the pass is good at — not a restriction read against a wildcard.\n\n' +
+              'Empty on a `DELETED` change, where the underlying record no longer exists.',
             example: ['Netru Pro Entry', 'exit1'],
+          },
+          event_type: {
+            type: 'string',
+            enum: ['CREATED', 'UPDATED', 'REVOKED', 'SUSPENDED', 'EXPIRED', 'DELETED'],
+            description:
+              'What happened. `vehicle_type` says what the vehicle’s access *is*; this says why it ' +
+              'changed — and it is the only thing that can describe `DELETED`, where the record ' +
+              'itself is gone. See the endpoint description for the table of what to do with each.',
+            example: 'CREATED',
           },
         },
       },
@@ -277,12 +301,24 @@ const swaggerSpec = {
           next_cursor: {
             type: 'string',
             nullable: true,
-            description: 'Send this back as `cursor` on the next poll to receive only newer events.',
+            description:
+              'Send this back as `cursor` on the next poll to receive only newer changes. Store it ' +
+              '**only after** the page has been applied — it represents the last change you have ' +
+              'successfully processed. On an empty poll your own cursor is handed back.',
             example: 'MjAyNS0xMi0yMlQxMjozMzowMS44NDRafDY3ODlhYjAxYzJkM2U0ZjU2Nzg5MDEyMw',
           },
           has_more: {
             type: 'boolean',
-            description: 'true when more events are already waiting — poll again immediately instead of sleeping.',
+            description: 'true when more changes are already waiting — poll again immediately instead of sleeping.',
+            example: false,
+          },
+          resync_required: {
+            type: 'boolean',
+            description:
+              'Normally false. True when the cursor sent is older than the change log’s retention ' +
+              'window, so changes may have been pruned before this consumer read them and the page ' +
+              'could be hiding a revocation. Do not resume — rebuild the allow-list from a cold ' +
+              'start (no cursor).',
             example: false,
           },
           data: { type: 'array', items: { $ref: '#/components/schemas/VehicleFeedRecord' } },
@@ -311,6 +347,29 @@ const swaggerSpec = {
           },
           name: { type: 'string', maxLength: 150, example: 'Ramesh Kumar' },
           phone_number: { type: 'string', example: '+91 9876543210' },
+          occupant_type: {
+            type: 'string',
+            enum: RESIDENT_OCCUPANT_TYPES,
+            description:
+              'Who the holder is to this site: `resident` in a `society`, `tenant` in a `parking` ' +
+              'project.\n\n' +
+              '**Normally omitted** — it is filled in from the project’s own `project_type`, which ' +
+              'is the only thing that knows the answer. Sending the wrong kind for the site is a ' +
+              '400 naming the right one, and sending `visitor` is a 400 pointing at ' +
+              '`POST /api/visitors`: a visit is a window with a host, which a permanent ' +
+              'registration has nowhere to put.',
+            example: 'resident',
+          },
+          unit_number: {
+            type: 'string',
+            nullable: true,
+            maxLength: 50,
+            description:
+              'Flat, shop, bay or office number. Free text, because "A-402", "Shop 12" and ' +
+              '"Bay 7" are all correct at different sites — and because it is what a guard asks ' +
+              'for when a visitor names their host.',
+            example: 'A-402',
+          },
           vehicle_model: {
             type: 'string',
             nullable: true,
@@ -367,6 +426,16 @@ const swaggerSpec = {
           device_names: { type: 'array', items: { type: 'string' }, example: [] },
           name: { type: 'string', example: 'Ramesh Kumar' },
           phone_number: { type: 'string', example: '+91 9876543210' },
+          occupant_type: {
+            type: 'string',
+            nullable: true,
+            enum: [...RESIDENT_OCCUPANT_TYPES, null],
+            description:
+              'Who the holder is to this site. Null on rows registered before the field existed, ' +
+              'or under a project that never stated its type.',
+            example: 'resident',
+          },
+          unit_number: { type: 'string', nullable: true, example: 'A-402' },
           vehicle_model: {
             type: 'string',
             nullable: true,
@@ -670,6 +739,7 @@ const swaggerSpec = {
     ...userPaths,
     ...logPaths,
     ...analyticsPaths,
+    ...visitorPaths,
 
     // Cameras / Intozi: API-key authenticated, scoped to the key's project.
     '/api': {
@@ -710,24 +780,57 @@ const swaggerSpec = {
     '/api/feed': {
       get: {
         tags: ['ANPR'],
-        summary: 'Registered-vehicle feed polled by the Intozi server',
+        summary: 'Access-list feed polled by the Intozi server',
         description:
-          'Designed to be polled every 5-10 seconds. Reads the **registered-vehicle registry** — ' +
-          'not the detection log — so every vehicle the dashboard knows about appears here ' +
-          'whether or not a camera has ever seen it.\n\n' +
-          'Each row is `vehicle_number`, `group_id`, `vehicle_type` and `device_names`. ' +
-          '`vehicle_type` is derived from `valid_till` at read time, so a ' +
-          'registration that lapsed a minute ago already reads `unregistered`.\n\n' +
-          '**Read the status and the gates together.** A registration can be limited to specific ' +
-          'gates, so `vehicle_type: "registered"` means "this pass is current", not "open the ' +
-          'barrier anywhere". At a gate that is not in `device_names` the vehicle must be treated ' +
-          'as unregistered. Prilinesha applies that same rule ' +
-          'itself when it stamps an incoming event.\n\n' +
-          '**Polling loop:** call once without parameters (returns the oldest page), then send the ' +
-          '`next_cursor` from every response back as `cursor`. Each row is delivered exactly once; ' +
-          'renewing a registration re-sends it with its new status, which is how a poller learns ' +
-          'the status changed. While `has_more` is true, poll again immediately rather than ' +
-          'waiting for the next interval.\n\n' +
+          'Designed to be polled every 5-10 seconds. Returns **changes to vehicle access**, not ' +
+          'the vehicle list: Intozi keeps its own allow-list and applies each change to it.\n\n' +
+          'Both access lists feed it — the registered-vehicle registry and the visitor passes — ' +
+          'and a row does not say which it came from, because a barrier does not need to know. A ' +
+          'plate is either currently allowed at this gate or it is not.\n\n' +
+          '## The polling loop\n\n' +
+          '1. First ever call: no cursor. You receive the log from the beginning, which is how a ' +
+          'cold consumer builds its list.\n' +
+          '2. Apply the page to your allow-list.\n' +
+          '3. **Only then** store `next_cursor`, and send it as `cursor` on the next call.\n' +
+          '4. While `has_more` is true, poll again immediately rather than waiting for the ' +
+          'interval — you are behind, not idle.\n\n' +
+          'The cursor is the last change you have **successfully processed**. Re-sending the same ' +
+          'cursor always returns the same page, so a consumer that crashes or fails to apply a ' +
+          'page simply asks for it again. Never advance it before the page is applied.\n\n' +
+          'When nothing has changed you get `data: []`, `has_more: false`, and your own cursor ' +
+          'back — never the full vehicle list.\n\n' +
+          '## Applying a change\n\n' +
+          'Each row carries `event_type`, and `vehicle_type` telling you the state it leaves the ' +
+          'vehicle in. A consumer can act on either; `vehicle_type` alone is sufficient.\n\n' +
+          '| `event_type` | `vehicle_type` | What to do |\n' +
+          '| --- | --- | --- |\n' +
+          '| `CREATED` | registered | add the vehicle |\n' +
+          '| `UPDATED` | registered | add or replace it — also how a pre-booked visitor pass reports that its window has opened |\n' +
+          '| `UPDATED` | unregistered | it exists but is not valid yet; do not admit it |\n' +
+          '| `SUSPENDED` | unregistered | a registration was switched off — remove access |\n' +
+          '| `REVOKED` | unregistered | a visitor pass was withdrawn — remove access |\n' +
+          '| `EXPIRED` | unregistered | its `valid_till` passed — remove access |\n' +
+          '| `DELETED` | unregistered | the record is gone — remove it from your list |\n\n' +
+          'Events are delivered individually and in order, never collapsed. A vehicle that was ' +
+          'registered, then updated, then revoked produces three rows in that sequence, so ' +
+          'applying them in order always ends on the revocation.\n\n' +
+          '**Read the status and the gates together.** A grant can be limited to specific gates, ' +
+          'so `registered` means "this pass is current", not "open the barrier anywhere". At a ' +
+          'gate not in `device_names` the vehicle must be treated as unregistered. Prilinesha ' +
+          'applies that same rule when it stamps an incoming event. `device_names` is empty on ' +
+          '`DELETED`, where the record no longer exists to describe.\n\n' +
+          '## Expiry\n\n' +
+          'A pass closing at 18:00 generates an `EXPIRED` change shortly after 18:00, without ' +
+          'anyone touching the record. This matters more than it looks: the clock crossing ' +
+          '`valid_till` writes nothing to the underlying row, so a feed built on "what changed in ' +
+          'the vehicle collection" could never carry it, and the plate would stay in your ' +
+          'allow-list indefinitely. A background sweep publishes those transitions, normally ' +
+          'within a minute of them happening.\n\n' +
+          '## resync_required\n\n' +
+          'Normally `false`. It turns `true` when the cursor you sent is older than the change ' +
+          'log’s retention window, meaning changes may have been pruned before you read them and ' +
+          'the page you are being handed could have a gap where a revocation used to be. Do not ' +
+          'resume from that cursor: rebuild your allow-list from a cold start (no cursor).\n\n' +
           '**Scope:** a per-project key returns that project’s registrations only, with no ' +
           'parameter needed and none accepted that would widen it — naming a different `group_id` ' +
           'is a 403, not a wider read. Only the legacy shared `API_KEY` sees every project.',
@@ -747,7 +850,9 @@ const swaggerSpec = {
             in: 'query',
             required: false,
             schema: { type: 'string' },
-            description: 'The `next_cursor` from the previous response. Omit on the very first call.',
+            description:
+              'The `next_cursor` from the previous response — the last change successfully ' +
+              'processed. Omit only on a cold start, which replays the log from the beginning.',
           },
           {
             name: 'since',
@@ -775,7 +880,12 @@ const swaggerSpec = {
             in: 'query',
             required: false,
             schema: { type: 'string', enum: VEHICLE_TYPES },
-            description: 'Return only registered or only unregistered vehicles.',
+            description:
+              'Restrict to changes that leave the vehicle in this state.\n\n' +
+              '⚠️ **Not for the polling loop.** Filtering a change feed to `registered` hides ' +
+              'every event that takes access away — revocations, suspensions, expiries and ' +
+              'deletions all carry `unregistered` — leaving a consumer that can add plates but ' +
+              'never remove them. Kept only for query compatibility and ad-hoc inspection.',
           },
         ],
         responses: {
@@ -869,6 +979,16 @@ const swaggerSpec = {
             description:
               'The **effective** status. `registered` = switched on AND inside valid_till; ' +
               '`unregistered` = expired **or** deactivated.',
+          },
+          {
+            name: 'occupant_type',
+            in: 'query',
+            required: false,
+            schema: { type: 'string', enum: RESIDENT_OCCUPANT_TYPES },
+            description:
+              'The "residents" / "tenants" tab of the table. Only the permanent kinds are ' +
+              'filterable here — visitors are not on this table at all, they are their own ' +
+              'collection behind `GET /api/visitors`.',
           },
           {
             name: 'is_active',

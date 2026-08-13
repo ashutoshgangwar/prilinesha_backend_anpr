@@ -1,6 +1,11 @@
 const { body, param, query } = require('express-validator');
 
-const { VEHICLE_TYPES, REGISTRY_MAX_LIMIT } = require('../utils/constants');
+const {
+  VEHICLE_TYPES,
+  REGISTRY_MAX_LIMIT,
+  OCCUPANT_TYPES,
+  RESIDENT_OCCUPANT_TYPES,
+} = require('../utils/constants');
 const { GROUP_ID_PATTERN, DEVICE_NAME_PATTERN } = require('./projectValidator');
 const { dateRangeRules } = require('./dateRules');
 
@@ -25,6 +30,51 @@ const vehicleModelRule = (field) =>
     .trim()
     .isLength({ max: 100 })
     .withMessage('vehicle_model must be at most 100 characters.')
+    .customSanitizer((value) => value || null);
+
+/**
+ * Who the holder is to this site: `resident` in a society, `tenant` in a parking
+ * project.
+ *
+ * Optional on the wire, and normally omitted — the service fills it in from the
+ * project's own `project_type`, which is the only thing that actually knows the
+ * answer. The value is accepted here so a form can state it explicitly, but
+ * whether it is the *right* kind for that project is checked in the service,
+ * where the project is loaded: this rule cannot know which site the request is
+ * for, and a list that accepted only one word would be wrong for half of them.
+ *
+ * `visitor` is on the accepted list on purpose, so it reaches the service and
+ * gets the message that says where a visit is actually recorded, rather than a
+ * flat "must be one of" that does not mention `/api/visitors` at all.
+ *
+ * @param {Function} field `body` for a request field.
+ */
+const occupantTypeRule = (field) =>
+  field('occupant_type')
+    .optional({ checkFalsy: true })
+    .isString()
+    .withMessage('occupant_type must be a string.')
+    .bail()
+    .trim()
+    .toLowerCase()
+    .isIn(OCCUPANT_TYPES)
+    .withMessage(`occupant_type must be one of: ${OCCUPANT_TYPES.join(', ')}.`);
+
+/**
+ * Flat, shop, bay or office number — free text, because "A-402", "Shop 12" and
+ * "Bay 7" are all correct at different sites. Empty and null both clear it.
+ *
+ * @param {Function} field `body` for a request field.
+ */
+const unitNumberRule = (field) =>
+  field('unit_number')
+    .optional({ nullable: true })
+    .isString()
+    .withMessage('unit_number must be a string.')
+    .bail()
+    .trim()
+    .isLength({ max: 50 })
+    .withMessage('unit_number must be at most 50 characters.')
     .customSanitizer((value) => value || null);
 
 /**
@@ -115,6 +165,8 @@ const registerVehicleRules = [
     ),
 
   vehicleModelRule(body),
+  occupantTypeRule(body),
+  unitNumberRule(body),
 
   body('valid_till')
     .exists({ checkNull: true })
@@ -194,6 +246,8 @@ const updateVehicleRules = [
     ),
 
   vehicleModelRule(body),
+  occupantTypeRule(body),
+  unitNumberRule(body),
 
   body('valid_till')
     .optional()
@@ -283,6 +337,22 @@ const listVehiclesRules = [
     .toLowerCase()
     .isIn(VEHICLE_TYPES)
     .withMessage(`status must be one of: ${VEHICLE_TYPES.join(', ')}.`),
+
+  // The "residents" / "tenants" tab of the table. Only the permanent kinds are
+  // filterable here — visitors are not on this table at all; they are their own
+  // collection behind `GET /api/visitors`.
+  query('occupant_type')
+    .optional({ nullable: true, checkFalsy: true })
+    .isString()
+    .withMessage('occupant_type must be a string.')
+    .bail()
+    .trim()
+    .toLowerCase()
+    .isIn(RESIDENT_OCCUPANT_TYPES)
+    .withMessage(
+      `occupant_type must be one of: ${RESIDENT_OCCUPANT_TYPES.join(', ')}. ` +
+        'Visitor passes are listed by GET /api/visitors.'
+    ),
 
   // The manual switch on its own, which `status` cannot express — it folds
   // expiry in, so `status=unregistered` cannot answer "which have we suspended?"

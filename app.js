@@ -9,6 +9,7 @@ const swaggerSpec = require('./docs/swagger');
 
 const anprRoutes = require('./routes/anpr');
 const vehicleRoutes = require('./routes/vehicles');
+const visitorRoutes = require('./routes/visitors');
 const logRoutes = require('./routes/logs');
 const analyticsRoutes = require('./routes/analytics');
 const authRoutes = require('./routes/auth');
@@ -86,6 +87,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/projects', projectRoutes);
 app.use('/api/vehicles', vehicleRoutes);
+app.use('/api/visitors', visitorRoutes);
 app.use('/api/logs', logRoutes);
 app.use('/api/analytics', analyticsRoutes);
 
@@ -105,6 +107,7 @@ app.get('/', (_req, res) => {
       users: '/api/users',
       projects: '/api/projects',
       vehicles: '/api/vehicles',
+      visitors: '/api/visitors',
       logs: '/api/logs',
       analytics: '/api/analytics',
       anpr: '/api',

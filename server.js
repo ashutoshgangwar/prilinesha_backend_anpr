@@ -8,8 +8,11 @@ const { ensureStorageDirectories } = require('./utils/imageStorage');
 const { ensureSuperAdmin } = require('./config/bootstrap');
 const VehicleLog = require('./models/VehicleLog');
 const RegisteredVehicle = require('./models/RegisteredVehicle');
+const Visitor = require('./models/Visitor');
+const AccessChange = require('./models/AccessChange');
 const User = require('./models/User');
 const Project = require('./models/Project');
+const { startSweeper, stopSweeper } = require('./jobs/accessSweeper');
 
 let server;
 let shuttingDown = false;
@@ -28,9 +31,15 @@ const start = async () => {
     // group_id) exist even when autoIndex is disabled in production. syncIndexes
     // also DROPS indexes no longer declared on a schema, which is what retires
     // the old globally-unique plate index once registrations became per-project.
+    // AccessChange and the two sweep indexes matter most here: the feed's
+    // cursor and the expiry sweep are both index-only by design, and running
+    // either without its index turns a bounded lookup into a collection scan on
+    // a loop.
     await Promise.all([
       VehicleLog.syncIndexes(),
       RegisteredVehicle.syncIndexes(),
+      Visitor.syncIndexes(),
+      AccessChange.syncIndexes(),
       User.syncIndexes(),
       Project.syncIndexes(),
     ]);
@@ -38,6 +47,8 @@ const start = async () => {
       models: [
         VehicleLog.modelName,
         RegisteredVehicle.modelName,
+        Visitor.modelName,
+        AccessChange.modelName,
         User.modelName,
         Project.modelName,
       ],
@@ -46,6 +57,13 @@ const start = async () => {
     // Must run after the indexes exist, so the first super admin cannot be
     // written without the unique email constraint in place.
     await ensureSuperAdmin();
+
+    // Publishes the expiries and activations nothing else writes — see
+    // jobs/accessSweeper.js. Started after the indexes, since its whole claim to
+    // being cheap rests on them, and it runs once immediately so anything that
+    // lapsed while this process was down reaches Intozi at boot rather than
+    // after the first interval.
+    startSweeper();
 
     server = app.listen(config.PORT, () => {
       logger.info('HTTP server listening', {
@@ -81,6 +99,10 @@ const shutdown = async (signal, exitCode = 0) => {
   forceExit.unref();
 
   try {
+    // Before the database closes, so a sweep in flight cannot be cut off
+    // mid-write and leave rows claimed but unpublished.
+    stopSweeper();
+
     if (server) {
       await new Promise((resolve, reject) => {
         server.close((error) => (error ? reject(error) : resolve()));

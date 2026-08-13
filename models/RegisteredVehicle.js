@@ -1,5 +1,7 @@
 const mongoose = require('mongoose');
 
+const { RESIDENT_OCCUPANT_TYPES } = require('../utils/constants');
+
 /**
  * A vehicle registered from the internal dashboard, within one project.
  *
@@ -36,6 +38,23 @@ const registeredVehicleSchema = new mongoose.Schema(
     name: { type: String, required: true, trim: true },
     phone_number: { type: String, required: true, trim: true },
 
+    // Who the holder is to this site: `resident` in a society, `tenant` in a
+    // parking project. Derived from the project's own type when the vehicle is
+    // registered, so the dashboard shows each customer the word they use rather
+    // than a generic "owner" — and so a report can tell the permanent occupants
+    // apart from the visitor passes in models/Visitor.js.
+    //
+    // Nullable rather than required, for the same reason Project.project_type
+    // is: rows written before this field existed, and projects created without a
+    // type, must still save when the ingestion path touches them. Nothing in the
+    // barrier decision reads it — it is descriptive, not a permission.
+    occupant_type: { type: String, enum: [...RESIDENT_OCCUPANT_TYPES, null], default: null },
+
+    // Flat, shop, bay or office number. Free text, because "A-402", "Shop 12"
+    // and "Bay 7" are all correct at different sites — and because it is what a
+    // guard actually asks for when a visitor names their host.
+    unit_number: { type: String, trim: true, default: null },
+
     // Make and model as the dashboard user typed it — "Swift Dzire", "Activa
     // 6G". Free text on purpose: this is a note to help an operator recognise
     // the vehicle at the gate, not a field anything branches on, and a fixed
@@ -59,6 +78,20 @@ const registeredVehicleSchema = new mongoose.Schema(
     // because the record and its audit trail survive and it can be switched
     // back on without re-keying anything.
     is_active: { type: Boolean, default: true },
+
+    // When the sweeper wrote this registration's EXPIRED change (see
+    // jobs/accessSweeper.js). Null means "valid_till has not been reported as
+    // passed yet", which is what the sweeper looks for.
+    //
+    // This exists because expiry is the one state change nothing writes: the
+    // clock crosses valid_till and the document is untouched, so `updatedAt`
+    // cannot reveal it and the change feed would never carry it. The marker
+    // turns "has this been reported?" into an indexed equality, so the sweep
+    // touches only rows that have actually lapsed and never re-touches one.
+    //
+    // Reset to null whenever valid_till is extended, which is what re-arms a
+    // renewed registration to expire again later.
+    expiry_emitted_at: { type: Date, default: null },
 
     // Audit: which dashboard user registered or last renewed this vehicle.
     registered_by: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
@@ -99,12 +132,32 @@ registeredVehicleSchema.index(
 // Default dashboard listing: newest registration first, within a project.
 registeredVehicleSchema.index({ group_id: 1, createdAt: -1 }, { name: 'idx_group_created_at' });
 
-// The Intozi feed's keyset cursor walks (updatedAt, _id) within a project, every
-// 5-10 seconds. Without this the poll is a collection scan plus an in-memory
-// sort, which is the one query here that must never degrade.
+// The "residents" / "tenants" tab of that same table — the listing above with
+// one equality in front of it, so the sort still comes off the index.
+registeredVehicleSchema.index(
+  { group_id: 1, occupant_type: 1, createdAt: -1 },
+  { name: 'idx_group_occupant_created_at' }
+);
+
+// The Intozi feed's keyset cursor used to walk this collection directly. It now
+// reads the access-change log instead (models/AccessChange.js), but the index
+// stays: `GET /api/vehicles` sorts by updatedAt for the dashboard, and the seed
+// script walks the registry in this order to build the initial change log.
 registeredVehicleSchema.index(
   { group_id: 1, updatedAt: 1, _id: 1 },
   { name: 'idx_group_feed_cursor' }
+);
+
+// The expiry sweep, and the reason it is not a collection scan.
+//
+// Equality on the marker first, then a range on valid_till — the shape a
+// compound index serves best. The sweep asks "not yet reported, and lapsed",
+// which walks only the rows that have genuinely just expired, however many
+// hundred thousand registrations sit behind them. Once a row is marked it leaves
+// the index range for good.
+registeredVehicleSchema.index(
+  { expiry_emitted_at: 1, valid_till: 1 },
+  { name: 'idx_expiry_sweep' }
 );
 
 module.exports = mongoose.model('RegisteredVehicle', registeredVehicleSchema);

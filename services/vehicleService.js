@@ -2,11 +2,15 @@ const RegisteredVehicle = require('../models/RegisteredVehicle');
 const User = require('../models/User');
 const AppError = require('../utils/AppError');
 const logger = require('../utils/logger');
-const { resolveDeviceNames, listScopedGates } = require('./projectService');
+const { resolveDeviceNames, resolveOccupantType, listScopedGates } = require('./projectService');
+const { recordChange } = require('./accessChangeService');
 const {
   VEHICLE_TYPES,
   REGISTRY_DEFAULT_LIMIT,
   REGISTRY_MAX_LIMIT,
+  RESIDENT_OCCUPANT_TYPES,
+  ACCESS_EVENT_TYPES,
+  ACCESS_CHANGE_SOURCES,
 } = require('../utils/constants');
 
 /**
@@ -105,6 +109,13 @@ const toDashboardRecord = (record, now) => {
     name: record.name,
     phone_number: record.phone_number,
     vehicle_model: record.vehicle_model ?? null,
+
+    // What the holder is to this site — `resident` in a society, `tenant` in a
+    // parking project. Null on rows registered before the field existed, or
+    // under a project that never stated its type.
+    occupant_type: record.occupant_type ?? null,
+    unit_number: record.unit_number ?? null,
+
     valid_till: validTill,
 
     // The manual switch, as set by a dashboard user.
@@ -136,6 +147,35 @@ const toDashboardRecord = (record, now) => {
     updated_at: record.updatedAt,
   };
 };
+
+/**
+ * Writes one registration's change to the feed's log.
+ *
+ * Every write path below calls this after its own save has succeeded, so the
+ * event describes something that actually happened. The resulting access state
+ * is computed with the same `statusOf` the dashboard and the ingestion path use,
+ * so the log can never disagree with them about what a row means.
+ *
+ * @param {object} record   The saved registration (document or lean).
+ * @param {string} eventType One of ACCESS_EVENT_TYPES.
+ * @param {object} [context]
+ */
+const emitRegistrationChange = (record, eventType, { requestId } = {}) =>
+  recordChange(
+    {
+      groupId: record.group_id,
+      vehicleNumber: record.vehicle_number,
+      eventType,
+      // DELETED describes a row that no longer exists: whatever its dates said a
+      // moment ago, the only correct instruction now is "stop letting it in".
+      vehicleType:
+        eventType === ACCESS_EVENT_TYPES.DELETED ? 'unregistered' : statusOf(record, new Date()),
+      deviceNames: eventType === ACCESS_EVENT_TYPES.DELETED ? [] : record.device_names ?? [],
+      source: ACCESS_CHANGE_SOURCES.REGISTRATION,
+      sourceId: record._id,
+    },
+    { requestId }
+  );
 
 /**
  * Registers a vehicle in one project, or renews one already on that project's
@@ -180,6 +220,12 @@ const registerVehicle = async (payload, { actor, requestId } = {}) => {
       allDevices: payload.all_devices,
     })) ?? [];
 
+  // `resident` or `tenant`, according to what kind of site this project is.
+  // Also before the upsert: sending the wrong one for the site type is a 400,
+  // not a row that quietly disagrees with its own project. `undefined` back
+  // means neither the caller nor the project had an answer.
+  const occupantType = await resolveOccupantType(payload.group_id, payload.occupant_type);
+
   // The identity of a registration is the pair, never the plate alone.
   const identity = { group_id: payload.group_id, vehicle_number: payload.vehicle_number };
 
@@ -197,6 +243,11 @@ const registerVehicle = async (payload, { actor, requestId } = {}) => {
           is_active: true,
           updated_by: actor ? actor._id : null,
 
+          // Re-arms expiry. A renewal pushes valid_till into the future, so the
+          // EXPIRED change already reported for the previous term must be
+          // forgotten — otherwise the sweeper would never report the new one.
+          expiry_emitted_at: null,
+
           // Only written when supplied, so renewing a vehicle without re-typing
           // the model keeps the one already recorded. The required fields above
           // are always present, so they have no such question; this one is
@@ -204,6 +255,14 @@ const registerVehicle = async (payload, { actor, requestId } = {}) => {
           // not repeat it is how a registry loses information.
           ...(payload.vehicle_model !== undefined
             ? { vehicle_model: payload.vehicle_model || null }
+            : {}),
+
+          // Same rule for the two fields below, and the same reason: written
+          // only when there is something to write, so renewing a vehicle
+          // without re-typing its flat number keeps the one on record.
+          ...(occupantType !== undefined ? { occupant_type: occupantType } : {}),
+          ...(payload.unit_number !== undefined
+            ? { unit_number: payload.unit_number || null }
             : {}),
         },
         // Only on first insert, so a renewal by someone else does not rewrite
@@ -221,6 +280,15 @@ const registerVehicle = async (payload, { actor, requestId } = {}) => {
       id: String(record._id),
       valid_till: record.valid_till,
     });
+
+    // CREATED the first time this plate is known to the project, UPDATED on a
+    // renewal — Intozi applies both the same way (add or replace), but the
+    // distinction is what lets an operator read the log.
+    await emitRegistrationChange(
+      record,
+      created ? ACCESS_EVENT_TYPES.CREATED : ACCESS_EVENT_TYPES.UPDATED,
+      { requestId }
+    );
 
     return { vehicle: toDashboardRecord(record, now), created };
   } catch (error) {
@@ -255,6 +323,9 @@ const registerVehicle = async (payload, { actor, requestId } = {}) => {
  * @param {string} [params.status]     'registered' | 'unregistered' — the effective status, so
  *                                     a deactivated vehicle counts as unregistered whatever
  *                                     its valid_till says.
+ * @param {string} [params.occupantType] 'resident' | 'tenant' — the "residents" tab
+ *                                     of the table. Rows registered before the field
+ *                                     existed have none and are excluded by it.
  * @param {boolean} [params.isActive]  Filter on the manual switch alone, to answer
  *                                     "which vehicles have we suspended?" — a question
  *                                     `status` cannot express, since it folds expiry in.
@@ -281,6 +352,7 @@ const listVehicles = async (
   {
     search,
     status,
+    occupantType,
     isActive,
     registeredBy,
     deviceName,
@@ -310,8 +382,11 @@ const listVehicles = async (
       { name: term },
       { phone_number: term },
       { vehicle_model: term },
+      { unit_number: term },
     ];
   }
+
+  if (occupantType) filter.occupant_type = occupantType;
 
   if (isActive !== undefined && isActive !== null) {
     // `$ne: false` rather than `true`, so rows written before is_active existed
@@ -440,7 +515,7 @@ const listVehicleFilters = async (scopeFilter = {}, { requestId } = {}) => {
   // is_active existed count as active, which is what they are.
   const switchedOn = { is_active: { $ne: false } };
 
-  const [gates, total, registered, expired, deactivated, expiringSoon, actorIds] =
+  const [gates, total, registered, expired, deactivated, expiringSoon, occupantCounts, actorIds] =
     await Promise.all([
       listScopedGates(scopeFilter),
       RegisteredVehicle.countDocuments(scopeFilter),
@@ -452,6 +527,12 @@ const listVehicleFilters = async (scopeFilter = {}, { requestId } = {}) => {
         ...switchedOn,
         valid_till: { $gte: now, $lte: soon },
       }),
+      // The "residents" / "tenants" chips. One grouped pass rather than a count
+      // per kind, so adding a third occupant kind later costs no extra query.
+      RegisteredVehicle.aggregate([
+        { $match: scopeFilter },
+        { $group: { _id: '$occupant_type', count: { $sum: 1 } } },
+      ]),
       // Only operators who have registered something in this scope, so the
       // dropdown is the handful of people whose names appear in the table rather
       // than every account on the system.
@@ -473,10 +554,27 @@ const listVehicleFilters = async (scopeFilter = {}, { requestId } = {}) => {
     total,
   });
 
+  // Keyed by kind, with a zero for any kind nobody has registered yet — a chip
+  // that vanishes when its count hits zero is a filter an operator cannot find
+  // again. `unspecified` is the rows predating the field, reported rather than
+  // hidden so the numbers still add up to `total`.
+  const byOccupantType = Object.fromEntries(RESIDENT_OCCUPANT_TYPES.map((kind) => [kind, 0]));
+  let unspecifiedOccupants = 0;
+
+  occupantCounts.forEach(({ _id: kind, count }) => {
+    if (kind && kind in byOccupantType) byOccupantType[kind] = count;
+    else unspecifiedOccupants += count;
+  });
+
   return {
     projects: gates.projects,
     device_names: gates.device_names,
     statuses: [...VEHICLE_TYPES],
+
+    // What the "resident / tenant" filter can offer. Both kinds are always
+    // listed: which one a given project uses is decided by its project_type, and
+    // a scope covering several projects can legitimately hold both.
+    occupant_types: [...RESIDENT_OCCUPANT_TYPES],
 
     registered_by: actors.map((actor) => ({
       id: String(actor._id),
@@ -493,6 +591,11 @@ const listVehicleFilters = async (scopeFilter = {}, { requestId } = {}) => {
       // one needs renewing, the other switching back on.
       expired,
       deactivated,
+
+      // A second, independent partition of the same rows — by who the holder
+      // is rather than by whether their pass is current. These also sum to
+      // `total`, `unspecified` included.
+      by_occupant_type: { ...byOccupantType, unspecified: unspecifiedOccupants },
     },
 
     // Send `expiring_in_days=<within_days>` to open exactly these rows.
@@ -588,10 +691,20 @@ const updateVehicle = async (id, payload, scopeFilter = {}, { actor, requestId }
 
   if (resolved !== undefined) payload.device_names = resolved;
 
+  // Checked against the vehicle's own project — `group_id` is not editable, so
+  // there is only ever one project whose type could answer this. Only when the
+  // caller actually sent one: a PATCH that says nothing about the occupant kind
+  // must not have the project's default written over what is already there.
+  if (payload.occupant_type !== undefined) {
+    payload.occupant_type = await resolveOccupantType(record.group_id, payload.occupant_type);
+  }
+
   const updatable = [
     'name',
     'phone_number',
     'vehicle_model',
+    'occupant_type',
+    'unit_number',
     'valid_till',
     'device_names',
     'is_active',
@@ -611,10 +724,26 @@ const updateVehicle = async (id, payload, scopeFilter = {}, { actor, requestId }
     record[field] = payload[field];
   });
 
+  // Extending (or shortening) the term re-arms expiry: the new valid_till has
+  // not been reported yet, whatever was reported about the old one.
+  if (changed.includes('valid_till')) record.expiry_emitted_at = null;
+
   record.updated_by = actor ? actor._id : null;
   await record.save();
 
   log.info('Vehicle registration updated', { id: String(record._id), fields: changed });
+
+  // An edit that switches the registration off is a suspension, and Intozi has
+  // to treat it as "stop letting this vehicle in" rather than as an update it
+  // can merge. The resulting vehicle_type says so too, but the event type is
+  // what makes it unambiguous in the log.
+  await emitRegistrationChange(
+    record,
+    changed.includes('is_active') && record.is_active === false
+      ? ACCESS_EVENT_TYPES.SUSPENDED
+      : ACCESS_EVENT_TYPES.UPDATED,
+    { requestId }
+  );
 
   const populated = await RegisteredVehicle.findById(record._id)
     .populate('registered_by updated_by', ACTOR_FIELDS)
@@ -659,6 +788,14 @@ const setVehicleStatus = async (id, isActive, scopeFilter = {}, { actor, request
     by: actor ? String(actor._id) : 'system',
   });
 
+  // Switching off is a suspension; switching back on is an update that restores
+  // access, and carries the current gate list so Intozi can re-add it correctly.
+  await emitRegistrationChange(
+    record,
+    isActive ? ACCESS_EVENT_TYPES.UPDATED : ACCESS_EVENT_TYPES.SUSPENDED,
+    { requestId }
+  );
+
   const populated = await RegisteredVehicle.findById(record._id)
     .populate('registered_by updated_by', ACTOR_FIELDS)
     .lean();
@@ -695,6 +832,12 @@ const deleteVehicle = async (id, scopeFilter = {}, { actor, requestId } = {}) =>
     vehicle_number: record.vehicle_number,
     by: actor ? String(actor._id) : 'system',
   });
+
+  // The tombstone, and the only reason a hard delete is survivable at all: the
+  // row is gone, so nothing else could ever tell Intozi to drop the plate from
+  // its allow-list. Without this the vehicle would keep opening barriers on the
+  // strength of a record that no longer exists.
+  await emitRegistrationChange(record, ACCESS_EVENT_TYPES.DELETED, { requestId });
 
   return {
     id: String(record._id),

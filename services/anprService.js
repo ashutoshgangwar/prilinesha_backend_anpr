@@ -1,16 +1,12 @@
 const VehicleLog = require('../models/VehicleLog');
-const RegisteredVehicle = require('../models/RegisteredVehicle');
 const AppError = require('../utils/AppError');
 const logger = require('../utils/logger');
 const { saveEventImages, removeFiles } = require('../utils/imageStorage');
-const { encodeCursor, decodeCursor } = require('../utils/feedCursor');
-const { resolveVehicleStatus, statusOf } = require('./vehicleService');
+const { resolveVehicleStatus } = require('./vehicleService');
+const { resolveVisitorStatus } = require('./visitorService');
+const { readChanges } = require('./accessChangeService');
 const { touchDevice } = require('./projectService');
-const {
-  DEFAULT_VEHICLE_TYPE,
-  FEED_DEFAULT_LIMIT,
-  FEED_MAX_LIMIT,
-} = require('../utils/constants');
+const { DEFAULT_VEHICLE_TYPE } = require('../utils/constants');
 
 /**
  * ANPR business logic.
@@ -63,17 +59,40 @@ const createAnprEvent = async (payload, { project, requestId } = {}) => {
   //    honest record of what the vehicle's status was when it was seen — a
   //    registration expiring tomorrow cannot rewrite today's detections.
   //    An unknown plate falls back to whatever the camera claimed.
-  const registryStatus = await resolveVehicleStatus(
-    payload.vehicle_number ?? null,
-    payload.created_datetime,
-    { groupId, deviceName: payload.device_name }
-  );
+  //    A plate can be known to this project in two ways — a permanent
+  //    registration, or a visitor pass open right now — so both are asked, and
+  //    a `registered` from either is enough. Being on one list does not make a
+  //    vehicle less allowed for being absent from the other: a former resident
+  //    whose registration lapsed but who holds an afternoon's pass must get in.
+  const [registryStatus, visitorStatus] = await Promise.all([
+    resolveVehicleStatus(payload.vehicle_number ?? null, payload.created_datetime, {
+      groupId,
+      deviceName: payload.device_name,
+    }),
+    resolveVisitorStatus(payload.vehicle_number ?? null, payload.created_datetime, {
+      groupId,
+      deviceName: payload.device_name,
+    }),
+  ]);
 
-  const vehicleType = registryStatus ?? payload.vehicle_type ?? DEFAULT_VEHICLE_TYPE;
+  // null from both means the plate is unknown to this project entirely, and only
+  // then does the camera's own claim get a say.
+  const knownStatus =
+    registryStatus === 'registered' || visitorStatus === 'registered'
+      ? 'registered'
+      : registryStatus ?? visitorStatus;
+
+  const vehicleType = knownStatus ?? payload.vehicle_type ?? DEFAULT_VEHICLE_TYPE;
 
   log.info('Registration status resolved', {
     vehicle_type: vehicleType,
-    source: registryStatus ? 'registry' : 'payload-or-default',
+    registry: registryStatus,
+    visitor: visitorStatus,
+    source: knownStatus
+      ? visitorStatus === 'registered' && registryStatus !== 'registered'
+        ? 'visitor-pass'
+        : 'registry'
+      : 'payload-or-default',
   });
 
   // 3. Persist whichever images were sent — both are optional.
@@ -160,164 +179,67 @@ const createAnprEvent = async (payload, { project, requestId } = {}) => {
 };
 
 /**
- * Shapes one registration into the record Intozi expects.
+ * Reads the change feed consumed by the Intozi server every 5-10 seconds.
  *
- * The fields that go out are exactly FEED_DISCLOSED_FIELDS: the plate, the
- * project, whether it is currently registered, and the gates that holds at.
- * Everything else on the record — the owner's name, their phone number, who
- * registered it — is internal and never leaves the dashboard. Building the
- * object literally, rather than deleting fields from the document, means a
- * column added to the registry later cannot leak by default.
+ * ## What this returns
  *
- * The gates are disclosed because `vehicle_type` alone is not a barrier
- * decision: a registration restricted to `entry1` is `registered` here and must
- * still be refused at `exit2`. Prilinesha applies that rule itself when it
- * stamps an incoming event (see resolveVehicleStatus), but a poller acting on
- * the feed has no way to apply it without the list.
+ * Changes, not vehicles. Each row says what happened to one plate — CREATED,
+ * UPDATED, SUSPENDED, REVOKED, EXPIRED, DELETED — together with the access state
+ * that leaves it in and the gates it holds at. Intozi keeps its own allow-list
+ * and applies each row to it.
  *
- * The list goes out exactly as stored — no "valid everywhere" flag is derived
- * here. The dashboard resolves the operator's gate selection when the vehicle
- * is registered (`all_devices: true` is expanded to every active gate by name,
- * see resolveDeviceNames), so what a consumer receives is already the explicit
- * set of gates and needs no second rule to interpret it.
+ * This replaced a feed that returned the vehicle list itself. That version could
+ * not survive the registry growing: every poll, every 5-10 seconds, read rows
+ * proportional to the number of vehicles rather than to the number of things
+ * that had actually changed. With several lakh registrations that is a scan on a
+ * loop. Here a quiet minute costs an indexed lookup that matches nothing.
  *
- * @param {object} record Lean RegisteredVehicle document.
- * @param {Date} now      Instant to judge `valid_till` against.
- */
-const toFeedRecord = (record, now) => {
-  const deviceNames = record.device_names ?? [];
-
-  return {
-    vehicle_number: record.vehicle_number ?? null,
-    group_id: record.group_id ?? null,
-    // Derived, never stored, from the same two fields the dashboard reads: the
-    // moment valid_till passes the plate reads as unregistered without anyone
-    // flipping a flag, and a registration switched off on the dashboard reads as
-    // unregistered here on the very next poll.
-    vehicle_type: record.valid_till ? statusOf(record, now) : DEFAULT_VEHICLE_TYPE,
-    // The gates this registration is good for, exactly as the dashboard stored
-    // them. The frontend resolves "all gates" into the full list at
-    // registration time, so this is the complete set — not a restriction to be
-    // read against a wildcard.
-    device_names: [...deviceNames],
-  };
-};
-
-/**
- * Reads the vehicle list consumed by the Intozi server every 5-10 seconds.
+ * It also fixes two states the old feed could never express:
  *
- * The source is the dashboard's registered-vehicle registry, not the detection
- * log: Intozi asks "which plates do you know about, and are they current?", so
- * every registered vehicle appears whether or not a camera has ever seen it.
- * `vehicle_type` is computed per row from `valid_till` at read time.
+ *   expiry  — the clock passing valid_till writes nothing to the row, so no
+ *             cursor over the vehicle collections could carry it. It is now
+ *             published by jobs/accessSweeper.js, which is where the whole
+ *             argument is written out.
+ *   deletion — a hard-deleted row leaves nothing behind to describe. The write
+ *             paths now leave a DELETED tombstone in the log instead.
  *
- * Paging is keyset-based over (updatedAt, _id) ascending: hand the returned
- * `next_cursor` back on the following poll and you get every registration
- * created or renewed since — exactly once, with no gaps or repeats. An offset
- * would drift as rows are added between two polls. A renewal moves the row to
- * the end of the ordering, so it is re-sent with its new status; that is
- * deliberate, since a poller holding the old status needs to learn about it.
+ * ## Cursor
  *
- * A first call with no cursor returns the *oldest* page and reports `has_more`
- * until the registry is drained — a caller starting fresh must receive every
- * plate, not just recent ones.
+ * A keyset over (changed_at, _id) — see readChanges in accessChangeService, and
+ * the compound index it is served by. Send the previous response's `next_cursor`
+ * back and you get every change since, exactly once, in order. Re-sending the
+ * same cursor returns the same page, so a consumer that fails to apply a page
+ * simply asks for it again; the cursor only ever moves when the consumer says it
+ * has processed one.
  *
- * The feed is scoped by `scopeFilter`: a per-project API key can only ever walk
- * its own project's registrations, so a key leaked from one site cannot be used
- * to read another customer's plates. Only the legacy global key reads across
- * projects, which is why every row names its own `group_id`.
+ * A first call with no cursor replays the log from the beginning, which for a
+ * cold consumer is how it builds its list — see scripts/seedAccessChanges.js,
+ * which puts a CREATED row in the log for every vehicle that predates it.
+ *
+ * ## Scope
+ *
+ * `scopeFilter` is the same `group_id` fragment every other read in this system
+ * uses, applied unchanged: a per-project API key can only ever walk its own
+ * project's changes, and a change from one customer can never appear in
+ * another's feed. Only the legacy global key reads across projects, which is why
+ * every row still names its own `group_id`.
  *
  * @param {object} [params]
- * @param {string} [params.cursor]       Opaque cursor from a previous response.
- * @param {Date}   [params.since]        Return rows changed strictly after this instant.
- * @param {number} [params.limit]        Page size (default 100, max 1000).
- * @param {string} [params.vehicleType]  Restrict to 'registered' or 'unregistered'.
- * @param {object} [scopeFilter]         group_id fragment from buildScopeFilter().
+ * @param {string} [params.cursor]      Opaque cursor from a previous response.
+ * @param {Date}   [params.since]       Cold start from an instant. Ignored when cursor is sent.
+ * @param {number} [params.limit]       Page size (default 100, max 1000).
+ * @param {string} [params.vehicleType] Restrict to changes resulting in this state.
+ *                                      Discouraged — filtering a change feed by
+ *                                      outcome hides the events that take access
+ *                                      away. Kept for query-contract compatibility.
+ * @param {object} [scopeFilter]        group_id fragment from buildScopeFilter().
  * @param {object} [context]
- * @param {string} [context.requestId]   Correlation id for logging.
- * @returns {Promise<{ records: object[], count: number, next_cursor: string|null, has_more: boolean }>}
+ * @param {string} [context.requestId]
+ * @returns {Promise<{records: object[], count: number, next_cursor: string|null,
+ *                    has_more: boolean, resync_required: boolean}>}
  * @throws {AppError} 400 when the cursor is malformed.
  */
-const getVehicleFeed = async (
-  { cursor, since, limit, vehicleType } = {},
-  scopeFilter = {},
-  { requestId } = {}
-) => {
-  const log = logger.child({ requestId });
-  const pageSize = Math.min(Number(limit) || FEED_DEFAULT_LIMIT, FEED_MAX_LIMIT);
-
-  // One instant for the whole page, so two rows expiring in the same millisecond
-  // cannot disagree with each other.
-  const now = new Date();
-
-  const filter = { ...scopeFilter };
-
-  // Status is derived, not stored, so filtering by it compares the date and the
-  // manual switch rather than matching a column. Both halves must hold for
-  // registered; either failing is enough for unregistered.
-  if (vehicleType === 'registered') {
-    filter.is_active = { $ne: false };
-    filter.valid_till = { $gte: now };
-  } else if (vehicleType === 'unregistered') {
-    filter.$and = [{ $or: [{ is_active: false }, { valid_till: { $lt: now } }] }];
-  }
-
-  let position = null;
-
-  if (cursor) {
-    position = decodeCursor(cursor);
-    if (!position) {
-      throw AppError.badRequest('cursor is not a valid feed cursor.', [
-        { field: 'cursor', message: 'Send the next_cursor value returned by a previous response.' },
-      ]);
-    }
-
-    // Strictly after the cursor: same millisecond is disambiguated by _id.
-    filter.$or = [
-      { updatedAt: { $gt: position.receivedAt } },
-      { updatedAt: position.receivedAt, _id: { $gt: position.id } },
-    ];
-  } else if (since) {
-    filter.updatedAt = { $gt: since };
-  }
-
-  // is_active is read but never emitted — it feeds vehicle_type, which is the
-  // only form the feed discloses it in. Everything else here goes out as-is.
-  const projection = 'vehicle_number group_id valid_till is_active device_names updatedAt';
-
-  // Always oldest-first, including the very first call.
-  //
-  // The detection feed this replaced started a cold caller at the newest page,
-  // because replaying months of old sightings helps nobody. A registry is the
-  // opposite: a caller with no cursor is asking "what do you know about?", and
-  // anything skipped is a plate they will never be told about. So the first
-  // page is the oldest, and `has_more` walks the caller through the rest.
-  const documents = await RegisteredVehicle.find(filter)
-    .select(projection)
-    .sort({ updatedAt: 1, _id: 1 })
-    .limit(pageSize + 1) // one extra row answers has_more without a second query
-    .lean();
-
-  const hasMore = documents.length > pageSize;
-  const page = hasMore ? documents.slice(0, pageSize) : documents;
-
-  const last = page[page.length - 1];
-
-  log.info('Intozi feed served', {
-    count: page.length,
-    has_more: hasMore,
-    cursor: cursor || null,
-    scope: scopeFilter.group_id ?? 'all',
-  });
-
-  return {
-    records: page.map((record) => toFeedRecord(record, now)),
-    count: page.length,
-    // Keep the previous cursor alive on an empty poll so the caller never has
-    // to remember it themselves.
-    next_cursor: last ? encodeCursor({ received_at: last.updatedAt, _id: last._id }) : cursor || null,
-    has_more: hasMore,
-  };
-};
+const getVehicleFeed = async (params = {}, scopeFilter = {}, context = {}) =>
+  readChanges(params, scopeFilter, context);
 
 module.exports = { createAnprEvent, getVehicleFeed };
