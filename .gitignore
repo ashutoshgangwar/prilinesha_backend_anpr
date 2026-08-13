@@ -1,6 +1,17 @@
 node_modules/
+
+# env files
 .env
-.env.local
+.env.*
+!.env.example
+
+# readme / docs notes
+README.md
+README*.md
+README*.MD
+readme*.md
+readme*.MD
+
 logs/*
 !logs/.gitkeep
 *.log

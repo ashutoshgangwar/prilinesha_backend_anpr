@@ -110,6 +110,7 @@ const swaggerSpec = {
           'cam_id',
           'transaction_id',
           'vehicle_number',
+          'vehicle_type',
           'created_datetime',
         ],
         properties: {
@@ -156,10 +157,11 @@ const swaggerSpec = {
           },
           vehicle_type: {
             type: 'string',
-            nullable: true,
             enum: VEHICLE_TYPES,
-            default: 'unregistered',
-            description: 'Registration status. Omitted means "unregistered".',
+            description:
+              'Required. The status the camera believes the plate has. Advisory only: a plate ' +
+              'found on this project’s registry is stamped from the registry instead, and this ' +
+              'value is used only when the plate is unknown there.',
             example: 'registered',
           },
           vehicle_model: { type: 'string', nullable: true, maxLength: 100, example: 'Swift VXI' },
@@ -671,8 +673,9 @@ const swaggerSpec = {
           'The event is stored against the project the API key belongs to. A `group_id` in the ' +
           'body **cannot override that** — a key issued for one site can never write into another ' +
           'customer’s data. It is still read when the legacy unscoped `API_KEY` is used.\n\n' +
-          '`vehicle_type` is decided here, not taken from the camera: the plate is looked up in ' +
-          'that project’s registry and judged against `valid_till` at detection time.\n\n' +
+          '`vehicle_type` is mandatory on the request but is **not** authoritative: the plate is ' +
+          'looked up in that project’s registry and judged against `valid_till` at detection time, ' +
+          'and the sent value is used only when the plate is not on the registry at all.\n\n' +
           '`transaction_id` is idempotent **within a project**, so two customers may legitimately ' +
           'both send 4471.\n\n' +
           'A `device_name` the project has never seen is auto-registered and flagged rather than ' +

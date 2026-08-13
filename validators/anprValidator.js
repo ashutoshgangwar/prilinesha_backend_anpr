@@ -173,12 +173,22 @@ const anprEventRules = [
     .isIn(VEHICLE_COLORS)
     .withMessage(`color must be one of: ${VEHICLE_COLORS.join(', ')}.`),
 
+  // Mandatory: the camera must always state what it believes the plate's status
+  // is. It stays advisory — a plate found on the project's registry is stamped
+  // from the registry regardless (see services/anprService.js) — but requiring
+  // it means an unknown plate falls back to a value the sender chose rather than
+  // to a silent default.
   body('vehicle_type')
-    .optional({ nullable: true, checkFalsy: true })
+    .exists({ checkNull: true })
+    .withMessage('vehicle_type is required.')
+    .bail()
     .isString()
     .withMessage('vehicle_type must be a string.')
     .bail()
     .trim()
+    .notEmpty()
+    .withMessage('vehicle_type cannot be empty.')
+    .bail()
     .toLowerCase()
     .isIn(VEHICLE_TYPES)
     .withMessage(`vehicle_type must be one of: ${VEHICLE_TYPES.join(', ')}.`),
