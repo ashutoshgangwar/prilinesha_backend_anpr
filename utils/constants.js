@@ -13,6 +13,23 @@ const VEHICLE_TYPES = ['registered', 'unregistered'];
 /** A vehicle is treated as unregistered until it is positively known otherwise. */
 const DEFAULT_VEHICLE_TYPE = 'unregistered';
 
+/** Stamped on events whose sender identifies itself by application_id only. */
+const DEFAULT_APPLICATION_NAME = 'ANPR';
+
+/**
+ * The two vocabularies GET /api/feed can answer in, selected with `?keys=`.
+ *
+ * `canonical` is this API's own field names and the default, so an existing
+ * consumer is unaffected. `intozi` renames the disclosed fields to the names
+ * the Intozi payload uses (vehicle_number -> plate,
+ * vehicle_type -> vehicle_category), so a client can speak one vocabulary in
+ * both directions.
+ */
+const FEED_KEY_VOCABULARIES = ['canonical', 'intozi'];
+
+/** What `?keys=` means when it is not sent: nothing changes. */
+const DEFAULT_FEED_KEY_VOCABULARY = 'canonical';
+
 /**
  * The complete set of fields the Intozi feed (GET /api/feed) discloses. It reads
  * the registered-vehicle registry, and returns only these keys — the owner's
@@ -385,6 +402,9 @@ module.exports = {
   VEHICLE_COLORS,
   VEHICLE_TYPES,
   DEFAULT_VEHICLE_TYPE,
+  DEFAULT_APPLICATION_NAME,
+  FEED_KEY_VOCABULARIES,
+  DEFAULT_FEED_KEY_VOCABULARY,
   FEED_DISCLOSED_FIELDS,
   FEED_DEFAULT_LIMIT,
   FEED_MAX_LIMIT,

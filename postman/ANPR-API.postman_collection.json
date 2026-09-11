@@ -1341,13 +1341,12 @@
           "raw": "{\n  \"application_name\": \"ANPR\",\n  \"application_id\": 1,\n  \"device_name\": \"entry1\",\n  \"device_unique_key\": \"de21ba00-c4e2-474c-9106-b3bcc50e735f\",\n  \"group_id\": \"{{group_id}}\",\n  \"latitude\": \"12\",\n  \"longitude\": \"14\",\n  \"cam_id\": 3,\n  \"transaction_id\": {{transaction_id}},\n  \"color\": \"White\",\n  \"event_image\": \"/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==\",\n  \"vehicle_number\": \"UP32AB1234\",\n  \"vehicle_type\": \"registered\",\n  \"vehicle_model\": \"Swift VXI\",\n  \"owner_name\": \"Ramesh Kumar\",\n  \"contact_no\": \"+91 9876543210\",\n  \"email\": \"owner@example.com\",\n  \"driver_name\": \"Suresh Yadav\",\n  \"triple_riding\": false,\n  \"vehicle_class\": \"car\",\n  \"no_helmet\": false,\n  \"plate_image\": \"/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==\",\n  \"no_seatbelt\": false,\n  \"driver_on_call_status\": false,\n  \"created_datetime\": \"2025-12-22T12:33:01.744613\"\n}"
         },
         "url": {
-          "raw": "{{base_url}}/api/anpr",
+          "raw": "{{base_url}}/api",
           "host": [
             "{{base_url}}"
           ],
           "path": [
-            "api",
-            "anpr"
+            "api"
           ]
         },
         "description": "Filed under the project the API key belongs to — a group_id in the body cannot override that."
@@ -1360,6 +1359,56 @@
             "exec": [
               "pm.test('status is 200', () => pm.response.to.have.status(200));",
               "pm.test('event stored', () => pm.expect(pm.response.json().success).to.be.true);",
+              "// Bump the transaction id so the next run is not a duplicate.",
+              "pm.collectionVariables.set('transaction_id', Number(pm.collectionVariables.get('transaction_id')) + 1);"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "ANPR - create event with vendor keys (200)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{project_key}}"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"application_id\": 92,\n  \"cam_id\": 5,\n  \"plate\": \"NL07CA4869\",\n  \"plate_box\": [\n    279,\n    268,\n    309,\n    294\n  ],\n  \"vehicle_box\": [],\n  \"vehicle_class\": \"car\",\n  \"transaction_id\": {{transaction_id}},\n  \"created_datetime\": \"2026-09-09T14:25:05.689572\",\n  \"vehicle_category\": \"Unregistered\",\n  \"device_name\": \"cam4\",\n  \"device_unique_key\": \"97c81c46-2e6b-4ae5-ba9a-44cdae3ff707\",\n  \"group_id\": \"{{group_id}}\",\n  \"latitude\": \"45\",\n  \"longitude\": \"32\",\n  \"video_gif_data\": \"No video GIF found\",\n  \"frame\": \"/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==\",\n  \"plate_roi\": \"/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==\"\n}"
+        },
+        "url": {
+          "raw": "{{base_url}}/api",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api"
+          ]
+        },
+        "description": "The same event in the Intozi vocabulary: plate → vehicle_number, vehicle_category → vehicle_type, frame → event_image, plate_roi → plate_image. plate_box, vehicle_box and video_gif_data are accepted and discarded. application_name is omitted and defaults to \"ANPR\". The response comes back in the same vocabulary: plate, vehicle_category, frame_path, plate_roi_path."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 200', () => pm.response.to.have.status(200));",
+              "const data = pm.response.json().data;",
+              "// The response is named the way the request was: plate, vehicle_category, *_path.",
+              "pm.test('plate is returned as plate', () => pm.expect(data.plate).to.eql('NL07CA4869'));",
+              "pm.test('status is returned as vehicle_category', () => pm.expect(data.vehicle_category).to.be.oneOf(['registered', 'unregistered']));",
+              "pm.test('frame is returned as frame_path', () => pm.expect(data.frame_path).to.be.a('string'));",
+              "pm.test('plate_roi is returned as plate_roi_path', () => pm.expect(data.plate_roi_path).to.be.a('string'));",
+              "pm.test('no canonical name leaks in', () => pm.expect(data).to.not.have.any.keys('vehicle_number', 'vehicle_type', 'event_image_path', 'plate_image_path'));",
               "// Bump the transaction id so the next run is not a duplicate.",
               "pm.collectionVariables.set('transaction_id', Number(pm.collectionVariables.get('transaction_id')) + 1);"
             ]
@@ -1386,13 +1435,12 @@
           "raw": "{\n  \"application_name\": \"ANPR\",\n  \"application_id\": 1,\n  \"device_name\": \"entry1\",\n  \"device_unique_key\": \"de21ba00-c4e2-474c-9106-b3bcc50e735f\",\n  \"group_id\": \"{{group_id}}\",\n  \"cam_id\": 3,\n  \"transaction_id\": 108,\n  \"vehicle_number\": \"UP32AB1234\",\n  \"event_image\": \"/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==\",\n  \"plate_image\": \"/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==\",\n  \"created_datetime\": \"2025-12-22T12:33:01.744613\"\n}"
         },
         "url": {
-          "raw": "{{base_url}}/api/anpr",
+          "raw": "{{base_url}}/api",
           "host": [
             "{{base_url}}"
           ],
           "path": [
-            "api",
-            "anpr"
+            "api"
           ]
         },
         "description": "transaction_id is idempotent WITHIN a project — another project may reuse the same number."
@@ -1421,13 +1469,12 @@
         ],
         "description": "Polling feed for the Intozi server. First call: no cursor (returns the newest page). Every later call sends back the stored feed_cursor, so only new events arrive.",
         "url": {
-          "raw": "{{base_url}}/api/anpr/feed?cursor={{feed_cursor}}&limit=100",
+          "raw": "{{base_url}}/api/feed?cursor={{feed_cursor}}&limit=100",
           "host": [
             "{{base_url}}"
           ],
           "path": [
             "api",
-            "anpr",
             "feed"
           ],
           "query": [
@@ -1483,6 +1530,77 @@
       ]
     },
     {
+      "name": "ANPR - Intozi feed, Intozi field names (200)",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{project_key}}"
+          }
+        ],
+        "description": "The same feed named the way the POST payload is: plate and vehicle_category in place of vehicle_number and vehicle_type. group_id, device_names and event_type are unchanged, as is the envelope. Omit keys=intozi for the canonical names.",
+        "url": {
+          "raw": "{{base_url}}/api/feed?cursor={{feed_cursor}}&limit=100&keys=intozi",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "feed"
+          ],
+          "query": [
+            {
+              "key": "cursor",
+              "value": "{{feed_cursor}}",
+              "description": "next_cursor from the previous response; leave empty on the first call"
+            },
+            {
+              "key": "limit",
+              "value": "100",
+              "description": "1-1000, default 100"
+            },
+            {
+              "key": "vehicle_type",
+              "value": "registered",
+              "description": "optional filter",
+              "disabled": true
+            },
+            {
+              "key": "since",
+              "value": "2025-12-22T12:33:01.744Z",
+              "description": "optional cold start instead of cursor",
+              "disabled": true
+            },
+            {
+              "key": "keys",
+              "value": "intozi"
+            }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 200', () => pm.response.to.have.status(200));",
+              "const rows = pm.response.json().data;",
+              "pm.test('rows are named the Intozi way', () => {",
+              "  rows.forEach((row) => {",
+              "    pm.expect(row).to.have.property('plate');",
+              "    pm.expect(row).to.have.property('vehicle_category');",
+              "    pm.expect(row).to.not.have.any.keys('vehicle_number', 'vehicle_type');",
+              "  });",
+              "});",
+              "pm.test('the envelope is unchanged', () => pm.expect(pm.response.json()).to.include.keys('count', 'next_cursor', 'has_more', 'resync_required'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
       "name": "ANPR - Intozi feed, bad cursor (400)",
       "request": {
         "method": "GET",
@@ -1493,13 +1611,12 @@
           }
         ],
         "url": {
-          "raw": "{{base_url}}/api/anpr/feed?cursor=not-a-real-cursor",
+          "raw": "{{base_url}}/api/feed?cursor=not-a-real-cursor",
           "host": [
             "{{base_url}}"
           ],
           "path": [
             "api",
-            "anpr",
             "feed"
           ],
           "query": [
@@ -1541,13 +1658,12 @@
           "raw": "{\n  \"application_name\": \"ANPR\",\n  \"application_id\": \"not-a-number\",\n  \"device_name\": \"Intozi Camera 1\",\n  \"device_unique_key\": \"not-a-uuid\",\n  \"cam_id\": 3,\n  \"transaction_id\": 999,\n  \"vehicle_class\": \"spaceship\",\n  \"color\": \"Purple\",\n  \"event_image\": \"not-base64!!\",\n  \"plate_image\": \"not-base64!!\",\n  \"created_datetime\": \"22-12-2025\"\n}"
         },
         "url": {
-          "raw": "{{base_url}}/api/anpr",
+          "raw": "{{base_url}}/api",
           "host": [
             "{{base_url}}"
           ],
           "path": [
-            "api",
-            "anpr"
+            "api"
           ]
         }
       },
@@ -1579,13 +1695,12 @@
           "raw": "{}"
         },
         "url": {
-          "raw": "{{base_url}}/api/anpr",
+          "raw": "{{base_url}}/api",
           "host": [
             "{{base_url}}"
           ],
           "path": [
-            "api",
-            "anpr"
+            "api"
           ]
         }
       },
@@ -1785,13 +1900,12 @@
           }
         ],
         "url": {
-          "raw": "{{base_url}}/api/anpr/feed",
+          "raw": "{{base_url}}/api/feed",
           "host": [
             "{{base_url}}"
           ],
           "path": [
             "api",
-            "anpr",
             "feed"
           ]
         }

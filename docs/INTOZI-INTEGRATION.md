@@ -81,7 +81,6 @@ Authorization: Bearer pk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
 | Field | Type | Rule |
 |---|---|---|
-| `application_name` | string | 1–100 characters |
 | `application_id` | integer | ≥ 0 |
 | `device_name` | string | 1–150 characters. Identifies the gate |
 | `device_unique_key` | string | **Must be a valid UUID** |
@@ -89,6 +88,7 @@ Authorization: Bearer pk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 | `cam_id` | integer | ≥ 0 |
 | `transaction_id` | integer | ≥ 0. **Must be unique per project** — see [Idempotency](#idempotency-and-retries) |
 | `vehicle_number` | string | 3–20 chars, `A-Z 0-9 -` only. Uppercased automatically. An event with no plate cannot be matched against the registry, so do not post one |
+| `vehicle_type` | string | `registered` \| `unregistered`, case-insensitive — **advisory only**, see below |
 | `created_datetime` | string | ISO 8601. No offset is interpreted as **UTC** |
 
 #### Optional
@@ -97,9 +97,9 @@ Authorization: Bearer pk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 |---|---|---|
 | `latitude` | string | Numeric string, −90 to 90 |
 | `longitude` | string | Numeric string, −180 to 180 |
-| `vehicle_class` | string | `bus` \| `car` \| `bike` \| `truck` \| `auto` |
+| `application_name` | string | ≤ 100 characters. Defaults to `ANPR` when omitted |
+| `vehicle_class` | string | `bus` \| `car` \| `bike` \| `truck` \| `auto` — the body type, **not** the registration status |
 | `color` | string | `White` \| `Gray` \| `Yellow` \| `Red` \| `Green` \| `Blue` \| `Black` (case-sensitive) |
-| `vehicle_type` | string | `registered` \| `unregistered` — **advisory only**, see below |
 | `vehicle_model` | string | ≤ 100 characters |
 | `owner_name` | string | ≤ 150 characters |
 | `driver_name` | string | ≤ 150 characters |
@@ -120,6 +120,70 @@ event with no images is still accepted and stored.
 > up in that project's registry and decides `registered` / `unregistered` itself,
 > judged against the registration's expiry at detection time. Send your best guess
 > if you have one; the response tells you what was actually recorded.
+
+### Accepted key aliases
+
+Senders that already name these fields differently do not have to rename anything:
+the following keys are accepted and translated on arrival, so both spellings work.
+
+| Key you send | Stored as | Returned to you as | Meaning |
+|---|---|---|---|
+| `plate`, `plate_number`, `license_plate` | `vehicle_number` | the key you sent | Licence plate number |
+| `vehicle_category`, `vehicle_status` | `vehicle_type` | the key you sent | `registered` / `unregistered`, any casing |
+| `frame` | `event_image` | `frame_path` | Full-frame image, base64 |
+| `plate_roi` | `plate_image` | `plate_roi_path` | Cropped plate image, base64 |
+| `vehicle_class` | `vehicle_class` | — | Body type — `car`, `bus`, `bike`, `truck`, `auto` |
+| `group_id` | `group_id` | `group_id` | Project identifier, uppercased on arrival |
+
+Rules:
+
+- **The canonical name wins.** If a request carries both `vehicle_number` and
+  `plate`, the value of `vehicle_number` is stored and `plate` is ignored.
+- **`vehicle_class` is not `vehicle_type`.** `vehicle_class` is what kind of
+  vehicle it is (`car`); `vehicle_type` is whether the plate is registered at
+  this site. They are two different fields and both may be sent.
+- **`frame` / `plate_roi` that are not base64 image data are ignored, not
+  rejected.** A sentinel value such as `"No frame found"` is treated exactly
+  like an omitted image, and the event is still stored.
+- Keys this API does not model — `plate_box`, `vehicle_box`, `video_gif_data` —
+  are accepted and discarded. Sending them is harmless; they are not stored and
+  not returned.
+- **The response speaks your vocabulary.** Each field is named back the way you
+  named it, so a sender that posts `plate` reads `plate` in the response and
+  never has to learn the canonical name. An image field gains a `_path` suffix,
+  because what comes back is where the image was stored, not the image. The
+  values are identical either way, and a sender that posts the canonical names
+  gets a response identical to the one it has always received.
+- Field names are per field, not per request: post `vehicle_number` alongside
+  `vehicle_category` and the response carries exactly those two names.
+
+A payload in the vendor's own vocabulary is therefore accepted as-is:
+
+```json
+{
+  "application_id": 92,
+  "cam_id": 5,
+  "plate": "NL07CA4869",
+  "plate_box": [279, 268, 309, 294],
+  "vehicle_box": [],
+  "vehicle_class": "car",
+  "transaction_id": 22,
+  "created_datetime": "2026-09-09T14:25:05.689572",
+  "vehicle_category": "Unregistered",
+  "device_name": "cam4",
+  "device_unique_key": "97c81c46-2e6b-4ae5-ba9a-44cdae3ff707",
+  "group_id": "Intozi_Group_1",
+  "latitude": "45",
+  "longitude": "32",
+  "video_gif_data": "No video GIF found",
+  "frame": "<base64 jpg/png>",
+  "plate_roi": "<base64 jpg/png>"
+}
+```
+
+It is stored as `vehicle_number: "NL07CA4869"`, `vehicle_class: "car"`,
+`vehicle_type: "unregistered"` (unless the plate is on the project's registry,
+which wins), `group_id: "INTOZI_GROUP_1"` and `application_name: "ANPR"`.
 
 ### Success response — `200 OK`
 
@@ -142,6 +206,30 @@ event with no images is still accepted and stored.
 
 `data.vehicle_type` is the **authoritative** status Prilinesha recorded, which may
 differ from what was sent.
+
+The same event posted in the vendor vocabulary is answered in that vocabulary —
+same values, your field names:
+
+```json
+{
+  "success": true,
+  "message": "ANPR event stored successfully.",
+  "data": {
+    "id": "6aa3a8db2c9af862ae6477f1",
+    "group_id": "INTOZI_GROUP_1",
+    "transaction_id": 22,
+    "plate": "NL07CA4869",
+    "vehicle_category": "unregistered",
+    "frame_path": "uploads/event-images/event_22_20260909T142505689Z_1c7c4497.jpg",
+    "plate_roi_path": "uploads/plate-images/plate_22_20260909T142505689Z_e73d36eb.jpg"
+  },
+  "requestId": "18889a86-c861-4515-ab26-f91c951dd73f"
+}
+```
+
+`vehicle_category` comes back lower-cased (`unregistered`, not `Unregistered`) —
+that is the stored value. `frame_path` / `plate_roi_path` are `null` when no
+decodable image was sent.
 
 ### Error responses
 
@@ -202,9 +290,10 @@ Authorization: Bearer pk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 |---|---|---|---|
 | `cursor` | string | — | `next_cursor` from the previous response. **The normal way to poll** |
 | `limit` | integer | `100` | 1–1000 |
-| `vehicle_type` | string | — | `registered` or `unregistered` |
+| `vehicle_type` | string | — | `registered` or `unregistered`. Also accepted as `vehicle_category` |
 | `since` | string | — | ISO 8601. Rows changed strictly after this instant |
 | `group_id` | string | — | Only meaningful for the legacy shared key |
+| `keys` | string | `canonical` | `canonical` or `intozi` — which vocabulary to name the response fields in (see below) |
 
 ### Success response — `200 OK`
 
@@ -270,6 +359,59 @@ are held on the Prilinesha side and are never sent.
 `vehicle_type` is computed when you read it, from the registration's expiry date.
 A registration that lapsed a minute ago already reads `unregistered`; nothing has
 to be flipped by hand.
+
+### Choosing the field names — `?keys=`
+
+A GET carries no body, so there is nothing to infer a vocabulary from: the
+caller names one.
+
+| Request | `data[]` rows are named |
+|---|---|
+| `GET /api/feed` | `vehicle_number`, `group_id`, `vehicle_type`, `device_names`, `event_type` |
+| `GET /api/feed?keys=canonical` | identical to omitting it |
+| `GET /api/feed?keys=intozi` | `plate`, `group_id`, `vehicle_category`, `device_names`, `event_type` |
+
+```bash
+curl -s "$BASE/api/feed?limit=100&keys=intozi" -H "Authorization: Bearer $KEY"
+```
+
+```json
+{
+  "success": true,
+  "message": "Vehicle feed fetched successfully.",
+  "count": 1,
+  "group_id": "INTOZI_GROUP_1",
+  "next_cursor": "MjAyNi0wOS0xMVQwNzoyNToyMS42MTZafDZhYTNhY2UxYTk1YTgxMzliMDMyYmU4YQ",
+  "has_more": false,
+  "resync_required": false,
+  "data": [
+    {
+      "plate": "MH12AB1234",
+      "group_id": "INTOZI_GROUP_1",
+      "vehicle_category": "registered",
+      "device_names": ["cam4"],
+      "event_type": "CREATED"
+    }
+  ],
+  "requestId": "0c436ae3-b4fd-427c-9ac7-75a57111c539"
+}
+```
+
+Rules:
+
+- **Only the two aliased fields are renamed.** `group_id`, `device_names` and
+  `event_type` are named the same in both vocabularies, and no value ever
+  differs — `keys` changes key names and nothing else.
+- **The envelope never changes.** `count`, `next_cursor`, `has_more`,
+  `resync_required` and the top-level `group_id` keep their names, so cursor
+  handling is identical either way.
+- **`keys=intozi` pairs with the `POST /api` aliases**, letting a client use
+  `plate` and `vehicle_category` in both directions.
+- **Omitting `keys` changes nothing**, so an existing consumer needs no edit.
+- Any other value is a `400`: `keys must be one of: canonical, intozi.`
+- The status filter is accepted under either name, so
+  `?keys=intozi&vehicle_category=registered` works — but read the warning above
+  before filtering the polling loop at all.
 
 ### Error responses
 
@@ -421,31 +563,196 @@ customer's data.
 
 ## 7. Quick test
 
+Every command below was run against a live server; the responses are the real
+output. Set the two variables and paste.
+
 ```bash
 KEY="pk_your_project_api_key"
 BASE="http://<host>:5050"
+```
 
-# Post a detection
-curl -X POST "$BASE/api" \
+### 1. Is the service up?
+
+```bash
+curl -s "$BASE/health"
+# {"status":"UP"}
+```
+
+### 2. Post a detection — vendor vocabulary
+
+```bash
+curl -s -X POST "$BASE/api" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $KEY" \
+  -d '{
+    "application_id": 92,
+    "cam_id": 5,
+    "plate": "NL07CA4869",
+    "plate_box": [279, 268, 309, 294],
+    "vehicle_box": [],
+    "vehicle_class": "car",
+    "transaction_id": 9001,
+    "created_datetime": "2026-09-09T14:25:05.689572",
+    "vehicle_category": "Unregistered",
+    "device_name": "cam4",
+    "device_unique_key": "97c81c46-2e6b-4ae5-ba9a-44cdae3ff707",
+    "group_id": "Intozi_Group_1",
+    "latitude": "45",
+    "longitude": "32",
+    "video_gif_data": "No video GIF found",
+    "frame": "<base64 jpg/png, or any placeholder>",
+    "plate_roi": "<base64 jpg/png, or any placeholder>"
+  }'
+```
+
+```json
+{
+  "success": true,
+  "message": "ANPR event stored successfully.",
+  "data": {
+    "id": "6aa3a9db5acb16fbbc7560d2",
+    "group_id": "INTOZI_GROUP_1",
+    "transaction_id": 9001,
+    "plate": "NL07CA4869",
+    "vehicle_category": "unregistered",
+    "frame_path": null,
+    "plate_roi_path": null
+  },
+  "requestId": "58caa513-a597-43ac-af36-40f9dc1e344c"
+}
+```
+
+`frame_path` / `plate_roi_path` are `null` above because the images were
+placeholders. Send real base64 and they carry the stored path.
+
+Re-run the same command unchanged and it returns **409** —
+`transaction_id 9001` is already stored. Bump `transaction_id` for each new
+event.
+
+### 3. Post a detection — canonical vocabulary
+
+Identical result, canonical names in and out:
+
+```bash
+curl -s -X POST "$BASE/api" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $KEY" \
   -d '{
     "application_name": "ANPR",
     "application_id": 1,
-    "device_name": "entry1",
+    "device_name": "cam4",
     "device_unique_key": "3f9a1c22-7b6e-4d55-9f0a-2c8b41d7e610",
     "group_id": "ACME_MALL_PARKING",
     "cam_id": 101,
-    "transaction_id": 1,
+    "transaction_id": 9002,
     "vehicle_number": "DL8CAF1234",
+    "vehicle_class": "car",
+    "vehicle_type": "registered",
     "created_datetime": "2026-08-07T12:33:01.744613"
   }'
+```
 
-# Poll the registered-vehicle list
+### 4. Poll the feed — first call, no cursor
+
+```bash
 curl -s "$BASE/api/feed?limit=100" -H "Authorization: Bearer $KEY"
+```
 
-# Continue from a cursor
-curl -s "$BASE/api/feed?cursor=<next_cursor>" -H "Authorization: Bearer $KEY"
+```json
+{
+  "success": true,
+  "message": "Vehicle feed fetched successfully.",
+  "count": 1,
+  "group_id": "INTOZI_GROUP_1",
+  "next_cursor": "MjAyNi0wOS0xMVQwNzoxMjozOC42MTRafDZhYTNhOWU2NWFjYjE2ZmJiYzc1NjBlMg",
+  "has_more": false,
+  "resync_required": false,
+  "data": [
+    {
+      "vehicle_number": "MH12AB1234",
+      "group_id": "INTOZI_GROUP_1",
+      "vehicle_type": "registered",
+      "device_names": ["cam4"],
+      "event_type": "CREATED"
+    }
+  ],
+  "requestId": "9b6b05c9-837c-49ca-83f3-013ff4d1e947"
+}
+```
+
+`"count": 0` with `"data": []` on a brand-new project is correct, not a fault:
+the feed reports *changes* to the registry, and a project with no registered
+vehicles has none to report.
+
+### 5. Poll the feed — resume from the cursor
+
+This is the steady-state call, every 5-10 seconds. Store `next_cursor` from the
+previous response and send it back:
+
+```bash
+curl -s "$BASE/api/feed?cursor=<next_cursor>&limit=100" -H "Authorization: Bearer $KEY"
+# {"count":0,"data":[],"next_cursor":"<same cursor>","has_more":false,...}
+```
+
+A quiet poll returns `count: 0` and hands back the same cursor. Keep the cursor;
+do not go back to the no-cursor call except for the daily resync.
+
+### 6. Poll the feed — in the Intozi vocabulary
+
+```bash
+curl -s "$BASE/api/feed?limit=100&keys=intozi" -H "Authorization: Bearer $KEY"
+```
+
+```json
+{
+  "count": 1,
+  "group_id": "INTOZI_GROUP_1",
+  "next_cursor": "MjAyNi0wOS0xMVQwNzoyNToyMS42MTZafDZhYTNhY2UxYTk1YTgxMzliMDMyYmU4YQ",
+  "has_more": false,
+  "resync_required": false,
+  "data": [
+    {
+      "plate": "MH12AB1234",
+      "group_id": "INTOZI_GROUP_1",
+      "vehicle_category": "registered",
+      "device_names": ["cam4"],
+      "event_type": "CREATED"
+    }
+  ]
+}
+```
+
+Same call without `keys=intozi` returns `vehicle_number` and `vehicle_type`
+instead. Everything else — cursor, counts, flags — is identical.
+
+### 7. Poll the feed — optional filters
+
+```bash
+curl -s "$BASE/api/feed?limit=50&vehicle_type=registered&since=2026-09-01T00:00:00Z" \
+  -H "Authorization: Bearer $KEY"
+
+# The status filter under the Intozi name, paired with Intozi field names
+curl -s "$BASE/api/feed?limit=50&keys=intozi&vehicle_category=registered" \
+  -H "Authorization: Bearer $KEY"
+```
+
+### Failure cases worth testing once
+
+```bash
+# No API key -> 401 UNAUTHORIZED
+curl -s -X POST "$BASE/api" -H "Content-Type: application/json" -d '{}'
+
+# Missing plate and status -> 400 VALIDATION_ERROR, naming both spellings
+curl -s -X POST "$BASE/api" \
+  -H "Content-Type: application/json" -H "Authorization: Bearer $KEY" \
+  -d '{"application_id":92,"cam_id":5,"transaction_id":9003,"device_name":"cam4",
+       "device_unique_key":"97c81c46-2e6b-4ae5-ba9a-44cdae3ff707",
+       "group_id":"Intozi_Group_1","created_datetime":"2026-09-09T14:25:05.689572"}'
+# errors: [{"field":"vehicle_number","message":"vehicle_number (or plate) is required."},
+#          {"field":"vehicle_type","message":"vehicle_type (or vehicle_category) is required."}]
+
+# Unparsable cursor -> 400
+curl -s "$BASE/api/feed?cursor=not-a-real-cursor" -H "Authorization: Bearer $KEY"
 ```
 
 Interactive API documentation, including every schema: **`<host>:5050/api-docs`**

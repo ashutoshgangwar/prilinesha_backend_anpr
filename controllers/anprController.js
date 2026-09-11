@@ -1,6 +1,7 @@
 const anprService = require('../services/anprService');
 const asyncHandler = require('../utils/asyncHandler');
 const { buildScopeFilter } = require('../middleware/auth');
+const { toSenderVocabulary, FEED_VENDOR_VOCABULARY } = require('../middleware/anprPayloadAliases');
 
 /**
  * POST /api/anpr
@@ -10,6 +11,12 @@ const { buildScopeFilter } = require('../middleware/auth');
  * `req.project` is set by the API-key middleware when the caller used a
  * per-project key; the service binds the event to that project regardless of
  * what the body claims.
+ *
+ * The response is written in whichever vocabulary the request used: a sender
+ * that posted `plate` and `frame` reads back `plate` and `frame_path`, one that
+ * posted `vehicle_number` and `event_image` reads back exactly what it always
+ * did. `req.anprAliases` records which names arrived (see
+ * middleware/anprPayloadAliases.js).
  */
 const createAnprEvent = asyncHandler(async (req, res) => {
   const result = await anprService.createAnprEvent(req.body, {
@@ -20,7 +27,7 @@ const createAnprEvent = asyncHandler(async (req, res) => {
   res.status(200).json({
     success: true,
     message: 'ANPR event stored successfully.',
-    data: result,
+    data: toSenderVocabulary(result, req.anprAliases),
     requestId: req.id,
   });
 });
@@ -37,9 +44,17 @@ const createAnprEvent = asyncHandler(async (req, res) => {
  * A per-project API key sees only its own project's changes — no `group_id`
  * parameter needed, and none accepted that would widen it. The legacy global key
  * reads across every project and may narrow with `?group_id=`.
+ *
+ * A GET carries no body to infer a vocabulary from, so the caller names one:
+ * `?keys=intozi` renames the disclosed fields to the Intozi payload's names
+ * (vehicle_number -> plate, vehicle_type -> vehicle_category). Omitted, the rows
+ * go out in this API's own names exactly as they always have.
  */
 const getVehicleFeed = asyncHandler(async (req, res) => {
-  const { cursor, since, limit, vehicle_type: vehicleType, group_id: groupId } = req.query;
+  const { cursor, since, limit, group_id: groupId, keys } = req.query;
+
+  // The status filter is accepted under either vocabulary's name.
+  const vehicleType = req.query.vehicle_type ?? req.query.vehicle_category;
 
   const scopeFilter = buildScopeFilter(req, groupId);
 
@@ -48,6 +63,11 @@ const getVehicleFeed = asyncHandler(async (req, res) => {
     scopeFilter,
     { requestId: req.id }
   );
+
+  const records =
+    keys === 'intozi'
+      ? feed.records.map((record) => toSenderVocabulary(record, FEED_VENDOR_VOCABULARY))
+      : feed.records;
 
   res.status(200).json({
     success: true,
@@ -62,7 +82,7 @@ const getVehicleFeed = asyncHandler(async (req, res) => {
     // before, but one that honours it re-seeds instead of resuming across a gap
     // that could be hiding a revocation.
     resync_required: feed.resync_required,
-    data: feed.records,
+    data: records,
     requestId: req.id,
   });
 });

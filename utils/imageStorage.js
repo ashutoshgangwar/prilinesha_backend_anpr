@@ -75,6 +75,23 @@ const decodeBase64Image = (raw, fieldName) => {
 };
 
 /**
+ * Cheap shape test: could this string decode as base64 image data at all?
+ *
+ * Deliberately weaker than decodeBase64Image — it checks the encoding, not the
+ * image — so callers can tell "the sender had no image and said so in words"
+ * apart from "the sender had an image and it is broken". The first should be
+ * ignored; the second is still a 400 from decodeBase64Image.
+ */
+const looksLikeBase64Payload = (raw) => {
+  if (typeof raw !== 'string') return false;
+
+  const payload = raw.replace(DATA_URI_PREFIX, '').replace(/\s/g, '');
+
+  // 64 chars is far below any real JPG/PNG but well above a sentinel phrase.
+  return payload.length >= 64 && payload.length % 4 === 0 && BASE64_CHARS.test(payload);
+};
+
+/**
  * Builds a collision-proof filename from the transaction id and a timestamp.
  * Example: event_108_20251222T123301844Z_9f3c1a20.jpg
  */
@@ -167,6 +184,7 @@ const removeFiles = async (absolutePaths = []) => {
 module.exports = {
   ensureStorageDirectories,
   decodeBase64Image,
+  looksLikeBase64Payload,
   saveImage,
   saveEventImages,
   removeFiles,

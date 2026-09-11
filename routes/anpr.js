@@ -2,6 +2,7 @@ const express = require('express');
 
 const anprController = require('../controllers/anprController');
 const apiKeyAuth = require('../middleware/apiKeyAuth');
+const normalizeAnprPayloadAliases = require('../middleware/anprPayloadAliases');
 const validate = require('../middleware/validate');
 const { anprEventRules, anprFeedQueryRules } = require('../validators/anprValidator');
 
@@ -21,10 +22,20 @@ const router = express.Router();
  * The event is stored against the key's project; a `group_id` in the body
  * cannot override it.
  *
+ * The vendor key names are accepted as aliases (`plate`, `frame`, `plate_roi`,
+ * `vehicle_category`) and translated before validation — see
+ * middleware/anprPayloadAliases.js.
+ *
  * 200 stored · 400 validation · 401 unauthorized · 403 project deactivated ·
  * 409 duplicate transaction_id
  */
-router.post('/', apiKeyAuth, validate(anprEventRules), anprController.createAnprEvent);
+router.post(
+  '/',
+  apiKeyAuth,
+  normalizeAnprPayloadAliases,
+  validate(anprEventRules),
+  anprController.createAnprEvent
+);
 
 /**
  * GET /api/anpr/feed

@@ -6,7 +6,7 @@ const { resolveVehicleStatus } = require('./vehicleService');
 const { resolveVisitorStatus } = require('./visitorService');
 const { readChanges } = require('./accessChangeService');
 const { touchDevice } = require('./projectService');
-const { DEFAULT_VEHICLE_TYPE } = require('../utils/constants');
+const { DEFAULT_VEHICLE_TYPE, DEFAULT_APPLICATION_NAME } = require('../utils/constants');
 
 /**
  * ANPR business logic.
@@ -116,7 +116,7 @@ const createAnprEvent = async (payload, { project, requestId } = {}) => {
   // 4. Insert the record, discarding the images if the write fails.
   try {
     const record = await VehicleLog.create({
-      application_name: payload.application_name,
+      application_name: payload.application_name ?? DEFAULT_APPLICATION_NAME,
       application_id: payload.application_id,
       device_name: payload.device_name,
       device_unique_key: payload.device_unique_key,

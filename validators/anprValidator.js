@@ -1,6 +1,12 @@
 const { body, query } = require('express-validator');
 
-const { VEHICLE_CLASSES, VEHICLE_COLORS, VEHICLE_TYPES, FEED_MAX_LIMIT } = require('../utils/constants');
+const {
+  VEHICLE_CLASSES,
+  VEHICLE_COLORS,
+  VEHICLE_TYPES,
+  FEED_MAX_LIMIT,
+  FEED_KEY_VOCABULARIES,
+} = require('../utils/constants');
 const { GROUP_ID_PATTERN } = require('./projectValidator');
 
 /**
@@ -47,16 +53,15 @@ const optionalCoordinate = (field, limit) =>
 
 const anprEventRules = [
   // ---- Source application ----
+  // Optional: the Intozi payload identifies its source with application_id
+  // alone, and a missing label is not a reason to drop a detection. The service
+  // stamps DEFAULT_APPLICATION_NAME when it is absent.
   body('application_name')
-    .exists({ checkNull: true })
-    .withMessage('application_name is required.')
-    .bail()
+    .optional({ nullable: true, checkFalsy: true })
     .isString()
     .withMessage('application_name must be a string.')
     .bail()
     .trim()
-    .notEmpty()
-    .withMessage('application_name cannot be empty.')
     .isLength({ max: 100 })
     .withMessage('application_name must be at most 100 characters.'),
 
@@ -139,7 +144,7 @@ const anprEventRules = [
   // camera that failed to read a plate should not post the event at all.
   body('vehicle_number')
     .exists({ checkNull: true })
-    .withMessage('vehicle_number is required.')
+    .withMessage('vehicle_number (or plate) is required.')
     .bail()
     .isString()
     .withMessage('vehicle_number must be a string.')
@@ -180,7 +185,7 @@ const anprEventRules = [
   // to a silent default.
   body('vehicle_type')
     .exists({ checkNull: true })
-    .withMessage('vehicle_type is required.')
+    .withMessage('vehicle_type (or vehicle_category) is required.')
     .bail()
     .isString()
     .withMessage('vehicle_type must be a string.')
@@ -313,15 +318,31 @@ const anprFeedQueryRules = [
     .withMessage(`limit must be an integer between 1 and ${FEED_MAX_LIMIT}.`)
     .toInt(),
 
-  query('vehicle_type')
+  // Accepted under either vocabulary's name, so a client that polls with
+  // ?keys=intozi can also filter with the field name it reads back.
+  ...['vehicle_type', 'vehicle_category'].map((field) =>
+    query(field)
+      .optional({ nullable: true, checkFalsy: true })
+      .isString()
+      .withMessage(`${field} must be a string.`)
+      .bail()
+      .trim()
+      .toLowerCase()
+      .isIn(VEHICLE_TYPES)
+      .withMessage(`${field} must be one of: ${VEHICLE_TYPES.join(', ')}.`)
+  ),
+
+  // Which vocabulary to answer in. Omitted means canonical, so a consumer that
+  // has always polled this feed sees no change.
+  query('keys')
     .optional({ nullable: true, checkFalsy: true })
     .isString()
-    .withMessage('vehicle_type must be a string.')
+    .withMessage('keys must be a string.')
     .bail()
     .trim()
     .toLowerCase()
-    .isIn(VEHICLE_TYPES)
-    .withMessage(`vehicle_type must be one of: ${VEHICLE_TYPES.join(', ')}.`),
+    .isIn(FEED_KEY_VOCABULARIES)
+    .withMessage(`keys must be one of: ${FEED_KEY_VOCABULARIES.join(', ')}.`),
 ];
 
 module.exports = { anprEventRules, anprFeedQueryRules };

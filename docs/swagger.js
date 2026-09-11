@@ -10,6 +10,8 @@ const {
   ROLE_VALUES,
   PERMISSIONS,
   RESIDENT_OCCUPANT_TYPES,
+  FEED_KEY_VOCABULARIES,
+  DEFAULT_FEED_KEY_VOCABULARY,
 } = require('../utils/constants');
 
 const { authPaths, projectPaths, userPaths, logPaths } = require('./swaggerAuthPaths');
@@ -121,7 +123,6 @@ const swaggerSpec = {
       AnprEvent: {
         type: 'object',
         required: [
-          'application_name',
           'application_id',
           'device_name',
           'device_unique_key',
@@ -133,7 +134,12 @@ const swaggerSpec = {
           'created_datetime',
         ],
         properties: {
-          application_name: { type: 'string', maxLength: 100, example: 'ANPR' },
+          application_name: {
+            type: 'string',
+            maxLength: 100,
+            description: 'Optional. Defaults to "ANPR" when the sender identifies itself by application_id only.',
+            example: 'ANPR',
+          },
           application_id: { type: 'integer', minimum: 0, example: 1 },
           device_name: { type: 'string', maxLength: 150, example: 'Intozi Camera 1' },
           device_unique_key: {
@@ -161,7 +167,10 @@ const swaggerSpec = {
           event_image: {
             type: 'string',
             nullable: true,
-            description: 'Optional. Base64 JPG/PNG, with or without a data-URI prefix.',
+            description:
+              'Optional. Base64 JPG/PNG, with or without a data-URI prefix. Also accepted as ' +
+              '`frame`. A value that is not base64 image data (e.g. "No frame found") is ' +
+              'treated as "no image" rather than rejected.',
             example: '/9j/4AAQSkZJRgABAQAAAQABAAD...',
           },
           vehicle_number: {
@@ -171,7 +180,7 @@ const swaggerSpec = {
             description:
               'Required. Letters, digits and hyphens only; uppercased on the way in. An event ' +
               'with no plate cannot be matched against the registry, so it is rejected rather ' +
-              'than stored.',
+              'than stored. Also accepted as `plate`, `plate_number` or `license_plate`.',
             example: 'UP32AB1234',
           },
           vehicle_type: {
@@ -180,7 +189,8 @@ const swaggerSpec = {
             description:
               'Required. The status the camera believes the plate has. Advisory only: a plate ' +
               'found on this project’s registry is stamped from the registry instead, and this ' +
-              'value is used only when the plate is unknown there.',
+              'value is used only when the plate is unknown there. Case-insensitive, and also ' +
+              'accepted as `vehicle_category` or `vehicle_status`.',
             example: 'registered',
           },
           vehicle_model: { type: 'string', nullable: true, maxLength: 100, example: 'Swift VXI' },
@@ -189,12 +199,21 @@ const swaggerSpec = {
           email: { type: 'string', format: 'email', nullable: true, example: 'owner@example.com' },
           driver_name: { type: 'string', nullable: true, maxLength: 150, example: 'Suresh Yadav' },
           triple_riding: { type: 'boolean', default: false },
-          vehicle_class: { type: 'string', nullable: true, enum: VEHICLE_CLASSES, example: 'car' },
+          vehicle_class: {
+            type: 'string',
+            nullable: true,
+            enum: VEHICLE_CLASSES,
+            description: 'Optional. The body type of the vehicle — not its registration status (see vehicle_type).',
+            example: 'car',
+          },
           no_helmet: { type: 'boolean', default: false },
           plate_image: {
             type: 'string',
             nullable: true,
-            description: 'Optional. Base64 JPG/PNG, with or without a data-URI prefix.',
+            description:
+              'Optional. Base64 JPG/PNG, with or without a data-URI prefix. Also accepted as ' +
+              '`plate_roi`. A value that is not base64 image data is treated as "no image" ' +
+              'rather than rejected.',
             example: '/9j/4AAQSkZJRgABAQAAAQABAAD...',
           },
           no_seatbelt: { type: 'boolean', default: false },
@@ -209,6 +228,11 @@ const swaggerSpec = {
       },
       AnprEventStored: {
         type: 'object',
+        description:
+          'The field names mirror the request. A sender that posted the vendor aliases reads ' +
+          'back `plate`, `vehicle_category`, `frame_path` and `plate_roi_path` in place of ' +
+          '`vehicle_number`, `vehicle_type`, `event_image_path` and `plate_image_path` — the ' +
+          'values are identical either way.',
         properties: {
           success: { type: 'boolean', example: true },
           message: { type: 'string', example: 'ANPR event stored successfully.' },
@@ -225,17 +249,33 @@ const swaggerSpec = {
                 example: 'ACME_MALL',
               },
               transaction_id: { type: 'integer', example: 108 },
-              vehicle_number: { type: 'string', nullable: true, example: 'MH12AB1234' },
+              vehicle_number: {
+                type: 'string',
+                nullable: true,
+                description: 'Named `plate` when the request used that alias.',
+                example: 'MH12AB1234',
+              },
               vehicle_type: {
                 type: 'string',
                 enum: VEHICLE_TYPES,
                 description:
                   'Resolved against this project’s registry at detection time — not taken from ' +
-                  'the camera when the plate is known.',
+                  'the camera when the plate is known. Named `vehicle_category` when the request ' +
+                  'used that alias; the value is always lower-case.',
                 example: 'registered',
               },
-              event_image_path: { type: 'string', example: 'uploads/event-images/event_108_20251222T123301844Z_9f3c1a20.jpg' },
-              plate_image_path: { type: 'string', example: 'uploads/plate-images/plate_108_20251222T123301851Z_1b7de904.jpg' },
+              event_image_path: {
+                type: 'string',
+                nullable: true,
+                description: 'Named `frame_path` when the request sent the image as `frame`. null when no image was stored.',
+                example: 'uploads/event-images/event_108_20251222T123301844Z_9f3c1a20.jpg',
+              },
+              plate_image_path: {
+                type: 'string',
+                nullable: true,
+                description: 'Named `plate_roi_path` when the request sent the image as `plate_roi`. null when no image was stored.',
+                example: 'uploads/plate-images/plate_108_20251222T123301851Z_1b7de904.jpg',
+              },
             },
           },
           requestId: { type: 'string', format: 'uuid' },
@@ -246,9 +286,18 @@ const swaggerSpec = {
         description:
           'One **change** on the Intozi feed — from a registration or a visitor pass, disclosed ' +
           'identically. Only the fields below go out; the owner’s name and phone, a pass’s host ' +
-          'and purpose, the dates, and every internal id stay on the dashboard.',
+          'and purpose, the dates, and every internal id stay on the dashboard.\n\n' +
+          'Field names follow `?keys`: with `keys=intozi` the two aliased fields are named ' +
+          '`plate` and `vehicle_category` instead of `vehicle_number` and `vehicle_type`. ' +
+          '`group_id`, `device_names` and `event_type` are named the same in both vocabularies, ' +
+          'and the values never differ.',
         properties: {
-          vehicle_number: { type: 'string', nullable: true, example: 'UP32AB1234' },
+          vehicle_number: {
+            type: 'string',
+            nullable: true,
+            description: 'Named `plate` when the request sent `keys=intozi`.',
+            example: 'UP32AB1234',
+          },
           group_id: {
             type: 'string',
             nullable: true,
@@ -881,11 +930,32 @@ const swaggerSpec = {
             required: false,
             schema: { type: 'string', enum: VEHICLE_TYPES },
             description:
-              'Restrict to changes that leave the vehicle in this state.\n\n' +
+              'Restrict to changes that leave the vehicle in this state. Also accepted as ' +
+              '`vehicle_category`, so a client polling with `keys=intozi` can filter using the ' +
+              'name it reads back.\n\n' +
               '⚠️ **Not for the polling loop.** Filtering a change feed to `registered` hides ' +
               'every event that takes access away — revocations, suspensions, expiries and ' +
               'deletions all carry `unregistered` — leaving a consumer that can add plates but ' +
               'never remove them. Kept only for query compatibility and ad-hoc inspection.',
+          },
+          {
+            name: 'vehicle_category',
+            in: 'query',
+            required: false,
+            schema: { type: 'string', enum: VEHICLE_TYPES },
+            description: 'The same filter as `vehicle_type`, under the Intozi payload’s name for it.',
+          },
+          {
+            name: 'keys',
+            in: 'query',
+            required: false,
+            schema: { type: 'string', enum: FEED_KEY_VOCABULARIES, default: DEFAULT_FEED_KEY_VOCABULARY },
+            description:
+              'Which vocabulary to name the response fields in. Omitted or `canonical` returns ' +
+              '`vehicle_number` and `vehicle_type`, exactly as this feed always has. `intozi` ' +
+              'returns `plate` and `vehicle_category` instead, matching the key names the Intozi ' +
+              'payload uses on `POST /api`, so a client can speak one vocabulary in both ' +
+              'directions. Values are identical either way — only the key names change.',
           },
         ],
         responses: {
