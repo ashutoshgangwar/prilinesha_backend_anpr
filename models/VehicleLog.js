@@ -1,7 +1,6 @@
 const mongoose = require('mongoose');
 
 const {
-  VEHICLE_CLASSES,
   VEHICLE_COLORS,
   VEHICLE_TYPES,
   DEFAULT_VEHICLE_TYPE,
@@ -36,7 +35,7 @@ const vehicleLogSchema = new mongoose.Schema(
 
     // ---- Detection ----
     vehicle_number: { type: String, trim: true, uppercase: true, default: null },
-    vehicle_class: { type: String, enum: [...VEHICLE_CLASSES, null], default: null },
+    vehicle_class: { type: String, trim: true, default: null },
     color: { type: String, enum: [...VEHICLE_COLORS, null], default: null },
 
     // Registration status. Defaults to "unregistered": a vehicle counts as

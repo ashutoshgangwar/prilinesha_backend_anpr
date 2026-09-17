@@ -1,7 +1,6 @@
 const { body, query } = require('express-validator');
 
 const {
-  VEHICLE_CLASSES,
   VEHICLE_COLORS,
   VEHICLE_TYPES,
   FEED_MAX_LIMIT,
@@ -101,9 +100,7 @@ const anprEventRules = [
   // services/anprService.js) — the key is the authority on scope, and this
   // field is the sender stating its intent.
   body('group_id')
-    .exists({ checkNull: true })
-    .withMessage('group_id is required.')
-    .bail()
+    .optional({ nullable: true })
     .isString()
     .withMessage('group_id must be a string.')
     .bail()
@@ -164,10 +161,7 @@ const anprEventRules = [
     .isString()
     .withMessage('vehicle_class must be a string.')
     .bail()
-    .trim()
-    .toLowerCase()
-    .isIn(VEHICLE_CLASSES)
-    .withMessage(`vehicle_class must be one of: ${VEHICLE_CLASSES.join(', ')}.`),
+    .trim(),
 
   body('color')
     .optional({ nullable: true, checkFalsy: true })
