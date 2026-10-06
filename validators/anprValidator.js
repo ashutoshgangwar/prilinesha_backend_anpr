@@ -1,11 +1,6 @@
-const { body, query } = require('express-validator');
+const { body } = require('express-validator');
 
-const {
-  VEHICLE_COLORS,
-  VEHICLE_TYPES,
-  FEED_MAX_LIMIT,
-  FEED_KEY_VOCABULARIES,
-} = require('../utils/constants');
+const { VEHICLE_COLORS, VEHICLE_TYPES } = require('../utils/constants');
 const { GROUP_ID_PATTERN } = require('./projectValidator');
 
 /**
@@ -264,79 +259,4 @@ const anprEventRules = [
     }),
 ];
 
-/**
- * Validation rules for GET /api/anpr/feed — the endpoint Intozi polls every
- * 5-10 seconds.
- */
-const anprFeedQueryRules = [
-  // Only narrows within what the key already grants: a per-project key that
-  // names a different project is rejected with 403, not silently widened.
-  query('group_id')
-    .optional({ nullable: true, checkFalsy: true })
-    .isString()
-    .withMessage('group_id must be a string.')
-    .bail()
-    .trim()
-    .toUpperCase()
-    .matches(GROUP_ID_PATTERN)
-    .withMessage('group_id is not a valid project identifier (e.g. ACME_MALL).'),
-
-  query('cursor')
-    .optional({ nullable: true, checkFalsy: true })
-    .isString()
-    .withMessage('cursor must be a string.')
-    .bail()
-    .trim()
-    .isLength({ max: 200 })
-    .withMessage('cursor is not a valid feed cursor.'),
-
-  query('since')
-    .optional({ nullable: true, checkFalsy: true })
-    .isString()
-    .withMessage('since must be an ISO 8601 datetime string.')
-    .bail()
-    .trim()
-    .isISO8601()
-    .withMessage('since must be a valid ISO 8601 datetime (e.g. 2025-12-22T12:33:01.744Z).')
-    .bail()
-    .customSanitizer((value) => {
-      // Same rule as created_datetime: a naive timestamp means UTC.
-      const hasTimezone = /(Z|[+-]\d{2}:?\d{2})$/i.test(value);
-      return new Date(hasTimezone ? value : `${value}Z`);
-    }),
-
-  // Omitted → the service falls back to FEED_DEFAULT_LIMIT.
-  query('limit')
-    .optional({ nullable: true, checkFalsy: true })
-    .isInt({ min: 1, max: FEED_MAX_LIMIT })
-    .withMessage(`limit must be an integer between 1 and ${FEED_MAX_LIMIT}.`)
-    .toInt(),
-
-  // Accepted under either vocabulary's name, so a client that polls with
-  // ?keys=intozi can also filter with the field name it reads back.
-  ...['vehicle_type', 'vehicle_category'].map((field) =>
-    query(field)
-      .optional({ nullable: true, checkFalsy: true })
-      .isString()
-      .withMessage(`${field} must be a string.`)
-      .bail()
-      .trim()
-      .toLowerCase()
-      .isIn(VEHICLE_TYPES)
-      .withMessage(`${field} must be one of: ${VEHICLE_TYPES.join(', ')}.`)
-  ),
-
-  // Which vocabulary to answer in. Omitted means canonical, so a consumer that
-  // has always polled this feed sees no change.
-  query('keys')
-    .optional({ nullable: true, checkFalsy: true })
-    .isString()
-    .withMessage('keys must be a string.')
-    .bail()
-    .trim()
-    .toLowerCase()
-    .isIn(FEED_KEY_VOCABULARIES)
-    .withMessage(`keys must be one of: ${FEED_KEY_VOCABULARIES.join(', ')}.`),
-];
-
-module.exports = { anprEventRules, anprFeedQueryRules };
+module.exports = { anprEventRules };

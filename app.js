@@ -92,8 +92,10 @@ app.use('/api/logs', logRoutes);
 app.use('/api/analytics', analyticsRoutes);
 
 // Cameras / Intozi: API-key authenticated, scoped to the key's project.
-// Mounted at the API root, so Intozi posts to `/api` and polls `/api/feed`.
-// Registered after the dashboard routers above so their prefixes still win.
+// Mounted at the API root, so cameras post detections to `/api`. The registry is
+// no longer polled from here — it is pushed to Intozi's watchlist as it changes
+// (services/intoziService.js). Registered after the dashboard routers above so
+// their prefixes still win.
 app.use('/api', anprRoutes);
 
 app.get('/', (_req, res) => {
@@ -111,7 +113,6 @@ app.get('/', (_req, res) => {
       logs: '/api/logs',
       analytics: '/api/analytics',
       anpr: '/api',
-      anprFeed: '/api/feed',
     },
   });
 });

@@ -627,8 +627,8 @@ const logPaths = {
       description:
         'The ANPR events themselves, with the owner resolved — **dashboard only**. A dashboard JWT ' +
         'is the only credential accepted, so a camera or Intozi API key cannot read this. That is ' +
-        'the separation that matters: `GET /api/feed` reads the *registry* and discloses three ' +
-        'fields, while this reads the *events* and names the owner.\n\n' +
+        'the separation that matters: the registry is pushed to Intozi’s watchlist with only the ' +
+        'disclosed fields, while this reads the *events* and names the owner.\n\n' +
         'Scoped to the caller. A super admin reads every project; a customer admin reads only the ' +
         'projects assigned to them; an account with no assignments sees nothing at all rather than ' +
         'everything. Omit `group_id` for all of the caller’s projects, or name one to narrow — ' +

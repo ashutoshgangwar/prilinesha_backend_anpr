@@ -132,6 +132,51 @@ const config = {
   // page with a silent hole in it. 0 disables pruning entirely.
   ACCESS_CHANGE_RETENTION_DAYS: asInt('ACCESS_CHANGE_RETENTION_DAYS', 30, { min: 0, max: 3650 }),
 
+  // ---- Intozi watchlist sync (Prilinesha -> Intozi Ikshana Registry) ----
+  //
+  // The direction reversed: instead of Intozi polling us for the registry, we
+  // push every registration change to Intozi's "manage_watchlist_anpr_app_db_data"
+  // API as it happens (see services/intoziService.js). These configure that
+  // outbound client.
+
+  // Master switch. Off by default so a deployment without an Intozi endpoint
+  // configured never tries to reach a placeholder URL — every sync call becomes
+  // a no-op until this is turned on. Turning it on requires a real base URL and
+  // key (checked below).
+  INTOZI_SYNC_ENABLED: optional('INTOZI_SYNC_ENABLED', 'false') === 'true',
+
+  // Base URL of the Intozi Ikshana server, e.g. https://ikshana.intozi.com/api.
+  // The watchlist paths (manage_watchlist_anpr_app_db_data, get_watchlist_…) are
+  // appended to this. Left blank until Intozi provides it.
+  INTOZI_BASE_URL: optional('INTOZI_BASE_URL', ''),
+
+  // Sent as the `x-api-key` header on every request to Intozi.
+  INTOZI_API_KEY: optional('INTOZI_API_KEY', ''),
+
+  // Per-request timeout for the outbound Intozi calls. A push happens inside a
+  // dashboard request, so it must not hang the operator's action if Intozi is
+  // slow — on timeout the push is logged as failed and the dashboard op still
+  // succeeds.
+  INTOZI_TIMEOUT_MS: asInt('INTOZI_TIMEOUT_MS', 10000, { min: 1000, max: 60000 }),
+
+  // `vehicle_category_name` is required by Intozi and is an integer id in their
+  // system (1 = "Guest" in their sample). Prilinesha's registry has no such
+  // category, so every pushed vehicle uses this default. Override per deployment
+  // once Intozi confirms the category ids for the site.
+  INTOZI_DEFAULT_VEHICLE_CATEGORY: asInt('INTOZI_DEFAULT_VEHICLE_CATEGORY', 1, { min: 0 }),
+
+  // The `vehicle_category_name` used when a *visitor pass* is pushed to the
+  // watchlist, so Intozi can tell a visitor apart from a permanent registration
+  // if its categories distinguish them. Defaults to the same as a registration;
+  // set it to the visitor category id Intozi uses once confirmed.
+  INTOZI_VISITOR_VEHICLE_CATEGORY: asInt('INTOZI_VISITOR_VEHICLE_CATEGORY', 1, { min: 0 }),
+
+  // The custom-field ids Intozi assigns: field_id 1 is device_name (the gate
+  // list), field_id 2 is group_id (society/group). Stated as config so a site
+  // whose Intozi instance numbers them differently can correct it without code.
+  INTOZI_FIELD_ID_DEVICE_NAME: asInt('INTOZI_FIELD_ID_DEVICE_NAME', 1, { min: 0 }),
+  INTOZI_FIELD_ID_GROUP_ID: asInt('INTOZI_FIELD_ID_GROUP_ID', 2, { min: 0 }),
+
   UPLOAD_DIR: path.resolve(process.cwd(), optional('UPLOAD_DIR', './uploads')),
   UPLOAD_PUBLIC_PATH: optional('UPLOAD_PUBLIC_PATH', '/uploads'),
   SERVE_UPLOADS: optional('SERVE_UPLOADS', 'true') === 'true',
@@ -208,6 +253,25 @@ if (Boolean(config.SUPER_ADMIN_EMAIL) !== Boolean(config.SUPER_ADMIN_PASSWORD)) 
 
 if (config.SUPER_ADMIN_PASSWORD && config.SUPER_ADMIN_PASSWORD.length < 8) {
   errors.push('SUPER_ADMIN_PASSWORD must be at least 8 characters');
+}
+
+// Turning the Intozi sync on without an endpoint to reach is a misconfiguration
+// that would otherwise fail silently on every push. A real base URL and key are
+// required when the switch is on.
+if (config.INTOZI_SYNC_ENABLED) {
+  if (!config.INTOZI_BASE_URL) {
+    errors.push('INTOZI_BASE_URL is required when INTOZI_SYNC_ENABLED=true');
+  } else if (!/^https?:\/\/.+/.test(config.INTOZI_BASE_URL)) {
+    errors.push('INTOZI_BASE_URL must start with http:// or https://');
+  }
+  if (!config.INTOZI_API_KEY) {
+    errors.push('INTOZI_API_KEY is required when INTOZI_SYNC_ENABLED=true');
+  }
+}
+
+// Normalise away a trailing slash so the path join never produces `//`.
+if (config.INTOZI_BASE_URL) {
+  config.INTOZI_BASE_URL = config.INTOZI_BASE_URL.replace(/\/+$/, '');
 }
 
 if (errors.length) {

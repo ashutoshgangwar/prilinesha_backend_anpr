@@ -115,6 +115,24 @@ const visitorSchema = new mongoose.Schema(
     // Audit: which dashboard user issued the pass, and who last touched it.
     issued_by: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
     updated_by: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+
+    // Mirror of this pass in Intozi's Ikshana watchlist, so the remote copy can
+    // be updated and deleted, not just created — same shape and meaning as
+    // RegisteredVehicle.intozi (see services/intoziService.js). A live pass is
+    // added to the watchlist; once it closes, is revoked or is deleted, it is
+    // removed again.
+    intozi: {
+      anpr_wl_id: { type: Number, default: null },
+      device_field_data_id: { type: Number, default: null },
+      group_field_data_id: { type: Number, default: null },
+      sync_status: {
+        type: String,
+        enum: ['pending', 'synced', 'failed', 'deleted'],
+        default: 'pending',
+      },
+      synced_at: { type: Date, default: null },
+      last_error: { type: String, default: null },
+    },
   },
   {
     timestamps: true,

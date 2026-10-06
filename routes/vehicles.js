@@ -18,13 +18,15 @@ const router = express.Router();
 /**
  * Registered-vehicle registry, driven by the dashboard.
  *
- * What is stored here decides what `GET /api/anpr/feed` reports to Intozi: a
- * plate registered under the detecting project and still inside its `valid_till`
- * window is reported as "registered", everything else as "unregistered".
+ * What is stored here is pushed to Intozi's Ikshana watchlist as it changes: a
+ * plate registered under a project and still inside its `valid_till` window is
+ * added/kept on the watchlist, everything else is removed from it (see
+ * services/intoziService.js).
  *
- * These endpoints moved from the shared API key to a dashboard token, because
- * "which vehicles may I see?" is now a per-user question. Cameras never call
- * them — they only POST events and poll the feed.
+ * The write verbs mirror the Intozi watchlist API — POST to add, PUT to update,
+ * DELETE to remove. These endpoints take a dashboard token, because "which
+ * vehicles may I see?" is a per-user question. Cameras never call them — they
+ * only POST detection events.
  */
 
 router.use(authenticate);
@@ -115,38 +117,39 @@ router.get(
 );
 
 /**
- * PATCH /api/vehicles/:id
+ * PUT /api/vehicles/:id   (PATCH is accepted as a legacy alias)
  * Authorization: Bearer <token>
  *
  * Edits name, phone_number, valid_till, device_names or is_active. Only the
  * fields sent change. `group_id` and `vehicle_number` are immutable — together
  * they are the row's identity; registering a different vehicle is a POST.
  *
+ * The dashboard write verbs mirror the Intozi watchlist ones — POST to add, PUT
+ * to update, DELETE to remove — and each one pushes the change straight through
+ * to Intozi (see services/intoziService.js).
+ *
  * 200 ok · 400 validation / empty body · 401 unauthorized · 404 not in your projects
  */
-router.patch(
-  '/:id',
-  authorize(PERMISSIONS.VEHICLE_WRITE),
-  validate(updateVehicleRules),
-  vehicleController.updateVehicle
-);
+router
+  .route('/:id')
+  .put(authorize(PERMISSIONS.VEHICLE_WRITE), validate(updateVehicleRules), vehicleController.updateVehicle)
+  .patch(authorize(PERMISSIONS.VEHICLE_WRITE), validate(updateVehicleRules), vehicleController.updateVehicle);
 
 /**
- * PATCH /api/vehicles/:id/status
+ * PUT /api/vehicles/:id/status   (PATCH is accepted as a legacy alias)
  * Authorization: Bearer <token>
  *
  * `{ "is_active": false }` marks the vehicle unregistered at every gate
- * immediately, whatever its valid_till says; `true` restores it. Live on
- * Intozi's next poll — the feed derives status from the same fields.
+ * immediately, whatever its valid_till says, and is deleted from Intozi's
+ * watchlist; `true` restores it and re-adds it. Convenience over `PUT /:id` for
+ * the one-field toggle the status switch sends.
  *
  * 200 ok · 400 validation · 401 unauthorized · 404 not in your projects
  */
-router.patch(
-  '/:id/status',
-  authorize(PERMISSIONS.VEHICLE_WRITE),
-  validate(setVehicleStatusRules),
-  vehicleController.setVehicleStatus
-);
+router
+  .route('/:id/status')
+  .put(authorize(PERMISSIONS.VEHICLE_WRITE), validate(setVehicleStatusRules), vehicleController.setVehicleStatus)
+  .patch(authorize(PERMISSIONS.VEHICLE_WRITE), validate(setVehicleStatusRules), vehicleController.setVehicleStatus);
 
 /**
  * DELETE /api/vehicles/:id

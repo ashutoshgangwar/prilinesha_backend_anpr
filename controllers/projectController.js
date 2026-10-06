@@ -38,10 +38,12 @@ const createProject = asyncHandler(async (req, res) => {
       // Null when no login was asked for, so the key is always present in the
       // shape and a client can test it rather than probing for its absence.
       login: login ?? null,
+      // How cameras authenticate when posting detections to this project. The
+      // registry is no longer polled back from here — Prilinesha pushes it to
+      // Intozi's watchlist as it changes (services/intoziService.js).
       intozi_setup: {
         group_id: project.group_id,
         post_url: '/api',
-        feed_url: '/api/feed',
         authorization_header: `Bearer ${apiKey}`,
       },
     },

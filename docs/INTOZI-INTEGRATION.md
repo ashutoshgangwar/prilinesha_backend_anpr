@@ -1,13 +1,20 @@
 # Prilinesha ANPR — Intozi Integration Guide
 
-Everything the Intozi server needs to integrate with the Prilinesha ANPR backend.
-There are exactly **two endpoints**: one to push detections, one to pull the
-registered-vehicle list.
+Everything the Intozi server needs to integrate with the Prilinesha ANPR backend,
+and everything Prilinesha needs to keep Intozi's **Ikshana watchlist** in step.
 
-| | Endpoint | Direction | Called by |
+The integration now runs in two directions, and the registry is no longer polled:
+
+| | Flow | Direction | Trigger |
 |---|---|---|---|
-| **1** | `POST /api` | Intozi → Prilinesha | Camera, on every detection |
-| **2** | `GET /api/feed` | Intozi ← Prilinesha | Intozi server, polled on a timer |
+| **1** | `POST /api` — detection events | Camera/Intozi → Prilinesha | Every vehicle detection |
+| **2** | Ikshana watchlist sync | Prilinesha → Intozi | Every registry change, as it happens |
+
+Flow 2 replaces the old `GET /api/feed` pull. Instead of Intozi polling Prilinesha
+for the registered-vehicle list, Prilinesha **pushes** each add / update / delete /
+expiry to Intozi's `manage_watchlist_anpr_app_db_data` API the moment it occurs, so
+Ikshana holds exactly the vehicles that are currently registered. See
+[Section 3](#3-ikshana-watchlist-sync-prilinesha--intozi).
 
 ---
 
@@ -270,211 +277,153 @@ the project, not global.
 
 ---
 
-## 3. `GET /api/feed` — poll the registered-vehicle list
+## 3. Ikshana watchlist sync (Prilinesha → Intozi)
 
-Returns the vehicles the Prilinesha dashboard knows about, and whether each is
-currently registered. **This is the registry, not a detection log** — a vehicle
-appears here as soon as it is registered, whether or not a camera has ever seen it.
+Prilinesha keeps Ikshana's watchlist in step by calling Intozi's
+`manage_watchlist_anpr_app_db_data` API whenever a registration changes. There is
+nothing for Intozi to poll and no cursor to manage — the push happens inside the
+dashboard action (or the expiry sweep) that caused the change.
 
-### Request
+### Direction of the rule
 
-```http
-GET /api/feed?limit=100 HTTP/1.1
-Host: <host>:5050
-Authorization: Bearer pk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-```
+The watchlist holds exactly the vehicles that are **currently registered** at a
+site. Every change is resolved to that one rule:
 
-### Query parameters — all optional
-
-| Parameter | Type | Default | Notes |
-|---|---|---|---|
-| `cursor` | string | — | `next_cursor` from the previous response. **The normal way to poll** |
-| `limit` | integer | `100` | 1–1000 |
-| `vehicle_type` | string | — | `registered` or `unregistered`. Also accepted as `vehicle_category` |
-| `since` | string | — | ISO 8601. Rows changed strictly after this instant |
-| `group_id` | string | — | Only meaningful for the legacy shared key |
-| `keys` | string | `canonical` | `canonical` or `intozi` — which vocabulary to name the response fields in (see below) |
-
-### Success response — `200 OK`
-
-```json
-{
-  "success": true,
-  "message": "Vehicle feed fetched successfully.",
-  "count": 2,
-  "group_id": "ACME_MALL_PARKING",
-  "next_cursor": "MjAyNi0wOC0wN1QxMDoxNTowMC4wMDBafDZhNzRjOTFkZTM3NGJkMzc3MDZhYjQzMA",
-  "has_more": false,
-  "data": [
-    {
-      "vehicle_number": "DL3CC9876",
-      "group_id": "ACME_MALL_PARKING",
-      "vehicle_type": "registered",
-      "device_names": ["Netru Pro Entry", "exit1"]
-    },
-    {
-      "vehicle_number": "DL5CX1222",
-      "group_id": "ACME_MALL_PARKING",
-      "vehicle_type": "registered",
-      "device_names": ["Netru Pro Entry"]
-    }
-  ],
-  "requestId": "a618d237-88f8-4d4b-bd47-62713898ed3c"
-}
-```
-
-### Response fields
-
-| Field | Meaning |
-|---|---|
-| `count` | Rows in `data` for this page |
-| `next_cursor` | Send back as `cursor` on the next poll. Never `null` once you have polled once |
-| `has_more` | `true` = more rows are already waiting. Poll again **immediately**, do not wait for the interval |
-| `data[].vehicle_number` | The plate, uppercased |
-| `data[].group_id` | The project this vehicle is registered under |
-| `data[].vehicle_type` | `registered` or `unregistered` |
-| `data[].device_names` | The **complete, explicit** list of gates this registration is good for. Names exactly as the cameras report them |
-
-Each row contains **exactly these four fields**. Owner names and phone numbers
-are held on the Prilinesha side and are never sent.
-
-> **`vehicle_type` is not a barrier decision on its own.** A registration can be
-> limited to specific gates, so `registered` means "this pass is current", not
-> "open anywhere". At a gate whose `device_name` is not in `device_names`, treat
-> the vehicle as **unregistered**:
->
-> ```
-> allowed = vehicle_type == "registered"
->           and device_name in device_names
-> ```
->
-> Match the gate name case-insensitively; Prilinesha applies the same rule
-> when it stamps an incoming event, so the two sides agree.
-
-> **There is no wildcard to interpret.** When a dashboard operator picks "all
-> gates", it is expanded to every active gate of the project **by name** before
-> being stored — so `device_names` is always the literal set of gates, and there
-> is no `all_gates` flag on the feed.
-
-`vehicle_type` is computed when you read it, from the registration's expiry date.
-A registration that lapsed a minute ago already reads `unregistered`; nothing has
-to be flipped by hand.
-
-### Choosing the field names — `?keys=`
-
-A GET carries no body, so there is nothing to infer a vocabulary from: the
-caller names one.
-
-| Request | `data[]` rows are named |
-|---|---|
-| `GET /api/feed` | `vehicle_number`, `group_id`, `vehicle_type`, `device_names`, `event_type` |
-| `GET /api/feed?keys=canonical` | identical to omitting it |
-| `GET /api/feed?keys=intozi` | `plate`, `group_id`, `vehicle_category`, `device_names`, `event_type` |
-
-```bash
-curl -s "$BASE/api/feed?limit=100&keys=intozi" -H "Authorization: Bearer $KEY"
-```
-
-```json
-{
-  "success": true,
-  "message": "Vehicle feed fetched successfully.",
-  "count": 1,
-  "group_id": "INTOZI_GROUP_1",
-  "next_cursor": "MjAyNi0wOS0xMVQwNzoyNToyMS42MTZafDZhYTNhY2UxYTk1YTgxMzliMDMyYmU4YQ",
-  "has_more": false,
-  "resync_required": false,
-  "data": [
-    {
-      "plate": "MH12AB1234",
-      "group_id": "INTOZI_GROUP_1",
-      "vehicle_category": "registered",
-      "device_names": ["cam4"],
-      "event_type": "CREATED"
-    }
-  ],
-  "requestId": "0c436ae3-b4fd-427c-9ac7-75a57111c539"
-}
-```
-
-Rules:
-
-- **Only the two aliased fields are renamed.** `group_id`, `device_names` and
-  `event_type` are named the same in both vocabularies, and no value ever
-  differs — `keys` changes key names and nothing else.
-- **The envelope never changes.** `count`, `next_cursor`, `has_more`,
-  `resync_required` and the top-level `group_id` keep their names, so cursor
-  handling is identical either way.
-- **`keys=intozi` pairs with the `POST /api` aliases**, letting a client use
-  `plate` and `vehicle_category` in both directions.
-- **Omitting `keys` changes nothing**, so an existing consumer needs no edit.
-- Any other value is a `400`: `keys must be one of: canonical, intozi.`
-- The status filter is accepted under either name, so
-  `?keys=intozi&vehicle_category=registered` works — but read the warning above
-  before filtering the polling loop at all.
-
-### Error responses
-
-| Status | `code` | Cause |
+| Dashboard action | Resulting state | Call to Intozi |
 |---|---|---|
-| `400` | `VALIDATION_ERROR` | Bad `cursor`, `limit`, `since` or `vehicle_type` |
-| `401` | `UNAUTHORIZED` | Missing or invalid API key |
-| `403` | `FORBIDDEN` | `group_id` names a project this key cannot read |
-| `429` | `RATE_LIMIT_EXCEEDED` | Over the request budget |
-| `500` | `INTERNAL_SERVER_ERROR` | Server fault — safe to retry |
+| Register a new vehicle | registered | `POST` add — stores the returned `anpr_wl_id` |
+| Renew / edit a registered vehicle | registered | `PUT` update (by `anpr_wl_id`) |
+| Deactivate (suspend) | unregistered | `DELETE` (by `data_id`) |
+| Expiry (`valid_till` passes) | unregistered | `DELETE`, published by the sweeper |
+| Delete the registration | gone | `DELETE` |
 
-### The polling loop
+A vehicle that should be allowed in is present on the watchlist (added, or updated
+if already there); a vehicle that should not is absent.
 
-1. **First call:** no `cursor`. Returns the **oldest** page of the registry.
-2. **Store `next_cursor`** from the response.
-3. **While `has_more` is `true`,** call again immediately with the new `cursor`.
-   Repeat until `has_more` is `false` — you now hold the complete list.
-4. **Every later call:** send the latest `cursor`. You receive only rows added or
-   renewed since, each exactly once.
-5. **On `429` or `5xx`,** keep the cursor you already have and retry after a delay.
-   Do **not** drop back to no-cursor; that restarts the full sync from the beginning.
+### Authentication
+
+Every call carries the `x-api-key` header issued by Intozi:
 
 ```
-GET /api/feed?limit=100            -> 100 rows, next_cursor = A, has_more = true
-GET /api/feed?limit=100&cursor=A   -> 100 rows, next_cursor = B, has_more = true    (immediately)
-GET /api/feed?limit=100&cursor=B   ->  12 rows, next_cursor = C, has_more = false   (full list held)
-   ... wait 5-10 s ...
-GET /api/feed?limit=100&cursor=C   ->   0 rows, next_cursor = C, has_more = false
-   ... a vehicle is registered ...
-GET /api/feed?limit=100&cursor=C   ->   1 row,  next_cursor = D, has_more = false
+x-api-key: <INTOZI_API_KEY>
 ```
 
-An empty page is normal and returns the cursor unchanged, so you never have to
-remember the last non-empty one.
+### Field mapping
 
-> **The first call is a full sync, not a sample.** With no cursor you get the oldest
-> page and must keep paging while `has_more` is `true`. Stopping after one page
-> leaves you with an incomplete list.
+| Prilinesha registry | Intozi watchlist field |
+|---|---|
+| `vehicle_number` | `vehicle_number` |
+| *(config)* `INTOZI_DEFAULT_VEHICLE_CATEGORY` | `vehicle_category_name` (required integer) |
+| `name` | `person_name` |
+| `phone_number` | `mobile_number` |
+| `vehicle_model` | `make_model` |
+| `unit_number` | `remarks` |
+| `device_names` (array) | custom field `field_id 1` (device_name), a JSON-array string |
+| `group_id` | custom field `field_id 2` (group_id) |
 
-> **Renewals reappear.** When a registration is extended, its row is re-sent with its
-> new status — that is how you learn the status changed. Treat a repeated
-> `vehicle_number` as an update to what you hold, not a duplicate.
+`device_names` is serialised as a stringified array, e.g. `["entry1","exit1"]`
+(empty — "every gate" on our side — becomes `"[]"`). The two custom-field ids
+(`field_id 1` = device_name, `field_id 2` = group_id) are configurable in case a
+particular Ikshana instance numbers them differently.
 
-> **Recommended: a full resync once a day.** A registration that simply *expires*
-> does not re-appear on a cursor poll, because nothing wrote to it. Call once with
-> no `cursor` (paging with `has_more` until exhausted) every 24 hours and replace
-> your cached list, so silently-expired plates are corrected.
+> **The custom-field `group_id` is independent** of the ANPR watchlist database
+> group's own `group_id`, exactly as the Ikshana document states. Prilinesha sends
+> its project `group_id` as the `field_id 2` custom-field value only.
+
+### Add (POST)
+
+```json
+{
+  "vehicle_number": "KA01MN7823",
+  "vehicle_category_name": 1,
+  "person_name": "Rohit Sharma",
+  "mobile_number": "9123456780",
+  "make_model": "Toyota Fortuner",
+  "remarks": "A-402",
+  "custom_field_data": [
+    { "field_id": 1, "custom_field_value": "[\"Camera10\",\"Camera12\"]" },
+    { "field_id": 2, "custom_field_value": "DLF_PARKING" }
+  ]
+}
+```
+
+The response's `id` is stored on the registration as `anpr_wl_id`, and each
+`custom_fields[].id` is stored as the `field_data_id` for that field — both are
+needed to update the record in place later.
+
+### Update (PUT)
+
+```json
+{
+  "anpr_wl_id": 21,
+  "vehicle_category_name": 1,
+  "person_name": "Rohit Sharma",
+  "mobile_number": "9123456780",
+  "make_model": "Toyota Fortuner",
+  "remarks": "A-402",
+  "image_updated": 0,
+  "custom_field_data": [
+    { "field_id": 1, "custom_field_value": "[\"Camera14\"]", "field_data_id": 25 },
+    { "field_id": 2, "custom_field_value": "DLF_PARKING", "field_data_id": 26 }
+  ]
+}
+```
+
+If a registration was created before its ids were captured, the `field_data_id`
+is omitted and Ikshana treats the field as new.
+
+### Delete (DELETE)
+
+```json
+{ "data_id": [21] }
+```
+
+The sweeper removes a whole batch of just-expired vehicles in one call by passing
+several ids.
+
+### Reliability
+
+The push is **best-effort and never blocks the dashboard.** A registration is
+committed to Prilinesha's own database first; the Intozi call then runs, and if
+Intozi is slow, down, or rejects the request, the dashboard action still succeeds
+and the row is marked `intozi.sync_status = "failed"` with the error, for a later
+reconcile. Each call has a hard timeout (`INTOZI_TIMEOUT_MS`). A duplicate delete
+(removing a plate Ikshana has already dropped) is harmless, which is why a crash
+mid-sweep costs at most a repeated instruction, never a silent hole.
+
+### Configuration
+
+Set these in the Prilinesha environment (`.env`). Sync is **off** until
+`INTOZI_SYNC_ENABLED=true`, at which point a base URL and key are required:
+
+| Variable | Meaning |
+|---|---|
+| `INTOZI_SYNC_ENABLED` | Master switch (`true`/`false`). Off = every push is a no-op |
+| `INTOZI_BASE_URL` | Ikshana base URL; the watchlist paths are appended to it |
+| `INTOZI_API_KEY` | Value sent as `x-api-key` |
+| `INTOZI_TIMEOUT_MS` | Per-request timeout (default 10000) |
+| `INTOZI_DEFAULT_VEHICLE_CATEGORY` | Integer `vehicle_category_name` for every pushed vehicle (default 1) |
+| `INTOZI_FIELD_ID_DEVICE_NAME` | Custom field id for the gate list (default 1) |
+| `INTOZI_FIELD_ID_GROUP_ID` | Custom field id for the group id (default 2) |
+
+> **Scope note.** This push covers the **registered-vehicle registry**. Visitor
+> passes still record to Prilinesha's internal change log but are not pushed to the
+> Ikshana watchlist; they can be added later over the same client if required.
 
 ---
 
-## 4. Rate limits and polling intervals
+## 4. Rate limits
 
-### The limit
+### The limit (on `POST /api`)
 
 | | Value |
 |---|---|
 | Budget | **300 requests per 60 seconds** |
 | Sustained rate | **5 requests per second** |
-| Scope | **Per source IP, shared across both endpoints** |
+| Scope | **Per source IP** |
 | Response when exceeded | `429` with `code: RATE_LIMIT_EXCEEDED` |
 
-`POST /api` and `GET /api/feed` draw on the **same** budget. Every poll you make is
-one fewer detection you can post in that minute.
+With the registry no longer polled, this budget is effectively all for detections.
 
 Standard rate-limit headers (IETF draft-7) are on every response — read them rather
 than counting requests yourself:
@@ -487,28 +436,13 @@ RateLimit-Policy: 300;w=60
 `reset` is **seconds until the window resets**. Note this is the single combined
 `RateLimit` header of draft-7, not the older `X-RateLimit-*` triplet.
 
-### Recommended polling interval
-
-**Poll `GET /api/feed` every 5–10 seconds.**
-
-| Interval | Polls/min | Left for `POST` | Detections/sec |
-|---|---|---|---|
-| 5 s | 12 | 288 | ~4.8 |
-| **10 s (recommended)** | **6** | **294** | **~4.9** |
-| 30 s | 2 | 298 | ~4.9 |
-
-Polling faster than every 5 seconds is not useful: it consumes budget without
-lowering latency in any way that matters for a barrier.
-
 ### Staying inside the budget
 
-- **Use `has_more`, not a tighter interval,** to catch up after a backlog. It costs
-  the same requests but clears far faster.
 - **Batch nothing on `POST`** — one event per request is the contract. If a site
   exceeds ~4.5 detections/sec sustained, tell us and we will raise the limit for
   that deployment rather than have you drop events.
-- **Back off on `429`.** Wait for `RateLimit-Reset` seconds, then resume from the
-  cursor you already hold. Do not retry in a tight loop.
+- **Back off on `429`.** Wait for `RateLimit-Reset` seconds, then retry. Do not
+  retry in a tight loop.
 - **One IP, one budget.** If several cameras share an outbound NAT address, they
   share the 300/min. Tell us the expected camera count per site so the limit can be
   sized correctly.
@@ -520,7 +454,6 @@ lowering latency in any way that matters for a barrier.
 | Max request body | **15 MB** (`413` beyond it) |
 | Max decoded image | **10 MB** per image |
 | Server request timeout | **30 seconds** |
-| Feed page size | 100 default, **1000 max** |
 
 Base64 inflates a payload by roughly one third — a 10 MB JPEG is about 13.3 MB on
 the wire. Two large images in one event will exceed the 15 MB body limit. Send one
@@ -535,9 +468,9 @@ API key.
 
 - A `pk_…` key **is** the project. `group_id` in a `POST` body is ignored; the key's
   project always wins.
-- On `GET /api/feed`, a `pk_…` key needs no `group_id` — it already returns only that
-  project. Naming a **different** project returns `403`, never a wider result.
-- Every feed row carries its own `group_id`, so rows are self-identifying.
+- Each project's registry is pushed to Ikshana under its own `group_id` (sent as the
+  `field_id 2` custom-field value), so vehicles stay partitioned by site on Intozi's
+  side too.
 
 This is a hard boundary: a key leaked from one site cannot read or write another
 customer's data.
@@ -553,11 +486,14 @@ customer's data.
 - [ ] `transaction_id` unique per project and monotonically increasing
 - [ ] `created_datetime` in ISO 8601 (UTC assumed when no offset is given)
 - [ ] `409` treated as "already delivered", not as a failure
-- [ ] Feed polled every 5–10 s, always with `cursor`
-- [ ] `has_more: true` triggers an immediate re-poll
-- [ ] `429` handled with a back-off that keeps the existing cursor
-- [ ] Full resync (no cursor) once every 24 hours
+- [ ] `429` handled with a back-off (not a tight retry loop)
 - [ ] `requestId` logged on every non-2xx, for support
+
+On the Prilinesha side, for the watchlist push (Section 3):
+
+- [ ] `INTOZI_BASE_URL` and `INTOZI_API_KEY` set, `INTOZI_SYNC_ENABLED=true`
+- [ ] `INTOZI_DEFAULT_VEHICLE_CATEGORY` confirmed with Intozi for the site
+- [ ] `intozi.sync_status = "failed"` rows monitored for reconcile
 
 ---
 
@@ -652,89 +588,23 @@ curl -s -X POST "$BASE/api" \
   }'
 ```
 
-### 4. Poll the feed — first call, no cursor
+### 4. Watch the watchlist push happen
+
+The registry push is server-to-server (Prilinesha → Intozi), so there is no
+endpoint on Prilinesha to curl for it. Register a vehicle from the dashboard and
+confirm it landed on Ikshana with Intozi's own read API:
 
 ```bash
-curl -s "$BASE/api/feed?limit=100" -H "Authorization: Bearer $KEY"
+# Register from the dashboard (JWT-authenticated), then read it back on Intozi:
+curl -s -X POST "$INTOZI_BASE/get_watchlist_anpr_app_db_data" \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: $INTOZI_API_KEY" \
+  -d '{"page":"1","page_size":"12"}'
+# -> the vehicle appears in data[], with custom_fields for device_name and group_id
 ```
 
-```json
-{
-  "success": true,
-  "message": "Vehicle feed fetched successfully.",
-  "count": 1,
-  "group_id": "INTOZI_GROUP_1",
-  "next_cursor": "MjAyNi0wOS0xMVQwNzoxMjozOC42MTRafDZhYTNhOWU2NWFjYjE2ZmJiYzc1NjBlMg",
-  "has_more": false,
-  "resync_required": false,
-  "data": [
-    {
-      "vehicle_number": "MH12AB1234",
-      "group_id": "INTOZI_GROUP_1",
-      "vehicle_type": "registered",
-      "device_names": ["cam4"],
-      "event_type": "CREATED"
-    }
-  ],
-  "requestId": "9b6b05c9-837c-49ca-83f3-013ff4d1e947"
-}
-```
-
-`"count": 0` with `"data": []` on a brand-new project is correct, not a fault:
-the feed reports *changes* to the registry, and a project with no registered
-vehicles has none to report.
-
-### 5. Poll the feed — resume from the cursor
-
-This is the steady-state call, every 5-10 seconds. Store `next_cursor` from the
-previous response and send it back:
-
-```bash
-curl -s "$BASE/api/feed?cursor=<next_cursor>&limit=100" -H "Authorization: Bearer $KEY"
-# {"count":0,"data":[],"next_cursor":"<same cursor>","has_more":false,...}
-```
-
-A quiet poll returns `count: 0` and hands back the same cursor. Keep the cursor;
-do not go back to the no-cursor call except for the daily resync.
-
-### 6. Poll the feed — in the Intozi vocabulary
-
-```bash
-curl -s "$BASE/api/feed?limit=100&keys=intozi" -H "Authorization: Bearer $KEY"
-```
-
-```json
-{
-  "count": 1,
-  "group_id": "INTOZI_GROUP_1",
-  "next_cursor": "MjAyNi0wOS0xMVQwNzoyNToyMS42MTZafDZhYTNhY2UxYTk1YTgxMzliMDMyYmU4YQ",
-  "has_more": false,
-  "resync_required": false,
-  "data": [
-    {
-      "plate": "MH12AB1234",
-      "group_id": "INTOZI_GROUP_1",
-      "vehicle_category": "registered",
-      "device_names": ["cam4"],
-      "event_type": "CREATED"
-    }
-  ]
-}
-```
-
-Same call without `keys=intozi` returns `vehicle_number` and `vehicle_type`
-instead. Everything else — cursor, counts, flags — is identical.
-
-### 7. Poll the feed — optional filters
-
-```bash
-curl -s "$BASE/api/feed?limit=50&vehicle_type=registered&since=2026-09-01T00:00:00Z" \
-  -H "Authorization: Bearer $KEY"
-
-# The status filter under the Intozi name, paired with Intozi field names
-curl -s "$BASE/api/feed?limit=50&keys=intozi&vehicle_category=registered" \
-  -H "Authorization: Bearer $KEY"
-```
+Deactivate, let expire, or delete the same vehicle on the dashboard and read again:
+it is gone from the watchlist.
 
 ### Failure cases worth testing once
 
@@ -750,9 +620,6 @@ curl -s -X POST "$BASE/api" \
        "group_id":"Intozi_Group_1","created_datetime":"2026-09-09T14:25:05.689572"}'
 # errors: [{"field":"vehicle_number","message":"vehicle_number (or plate) is required."},
 #          {"field":"vehicle_type","message":"vehicle_type (or vehicle_category) is required."}]
-
-# Unparsable cursor -> 400
-curl -s "$BASE/api/feed?cursor=not-a-real-cursor" -H "Authorization: Bearer $KEY"
 ```
 
 Interactive API documentation, including every schema: **`<host>:5050/api-docs`**

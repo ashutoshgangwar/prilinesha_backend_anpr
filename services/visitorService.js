@@ -5,6 +5,8 @@ const AppError = require('../utils/AppError');
 const logger = require('../utils/logger');
 const { resolveDeviceNames, findProjectOrFail } = require('./projectService');
 const { recordChange } = require('./accessChangeService');
+const intoziService = require('./intoziService');
+const config = require('../config/env');
 const {
   VEHICLE_TYPES,
   VISITOR_DEFAULT_LIMIT,
@@ -175,6 +177,14 @@ const toDashboardRecord = (record, now) => {
     issued_by: toActorSummary(record.issued_by),
     updated_by: toActorSummary(record.updated_by),
 
+    // Where this pass stands on Intozi's watchlist, for a badge on the dashboard.
+    // Same meaning as the registry's: pending | synced | failed | deleted.
+    intozi_sync: {
+      status: record.intozi?.sync_status ?? 'pending',
+      synced_at: record.intozi?.synced_at ?? null,
+      anpr_wl_id: record.intozi?.anpr_wl_id ?? null,
+    },
+
     created_at: record.createdAt,
     updated_at: record.updatedAt,
   };
@@ -205,6 +215,27 @@ const emitVisitorChange = (record, eventType, { requestId } = {}) =>
       sourceId: record._id,
     },
     { requestId }
+  );
+
+/**
+ * Pushes the pass's new state to Intozi's watchlist, right after it is committed
+ * and logged — the visitor counterpart of the registry's sync. A live pass is
+ * added/kept on the watchlist; a closed, revoked or deleted one is removed. The
+ * ids are persisted back onto the Visitor row (model: Visitor), and the visitor
+ * `vehicle_category_name` is used so Intozi can tell a visit from a resident.
+ *
+ * Never throws (see services/intoziService.js) — a slow or down Intozi must not
+ * fail the gate desk's action.
+ */
+const syncIntozi = (record, eventType, { requestId } = {}) =>
+  intoziService.syncRegistration(
+    {
+      record,
+      eventType,
+      vehicleType:
+        eventType === ACCESS_EVENT_TYPES.DELETED ? 'unregistered' : statusOf(record, new Date()),
+    },
+    { requestId, model: Visitor, vehicleCategory: config.INTOZI_VISITOR_VEHICLE_CATEGORY }
   );
 
 /**
@@ -492,6 +523,7 @@ const createVisitor = async (payload, { actor, requestId } = {}) => {
   });
 
   await emitVisitorChange(record, ACCESS_EVENT_TYPES.CREATED, { requestId });
+  await syncIntozi(record, ACCESS_EVENT_TYPES.CREATED, { requestId });
 
   const populated = await Visitor.findById(record._id)
     .populate('issued_by updated_by', ACTOR_FIELDS)
@@ -882,13 +914,12 @@ const updateVisitor = async (id, payload, scopeFilter = {}, { actor, requestId }
 
   // Revoking through the edit endpoint is still a revocation — Intozi must
   // remove access, not merge an update.
-  await emitVisitorChange(
-    record,
+  const eventType =
     changed.includes('is_active') && record.is_active === false
       ? ACCESS_EVENT_TYPES.REVOKED
-      : ACCESS_EVENT_TYPES.UPDATED,
-    { requestId }
-  );
+      : ACCESS_EVENT_TYPES.UPDATED;
+  await emitVisitorChange(record, eventType, { requestId });
+  await syncIntozi(record, eventType, { requestId });
 
   const populated = await Visitor.findById(record._id)
     .populate('issued_by updated_by', ACTOR_FIELDS)
@@ -946,11 +977,9 @@ const setVisitorStatus = async (id, isActive, scopeFilter = {}, { actor, request
     by: actor ? String(actor._id) : 'system',
   });
 
-  await emitVisitorChange(
-    record,
-    isActive ? ACCESS_EVENT_TYPES.UPDATED : ACCESS_EVENT_TYPES.REVOKED,
-    { requestId }
-  );
+  const eventType = isActive ? ACCESS_EVENT_TYPES.UPDATED : ACCESS_EVENT_TYPES.REVOKED;
+  await emitVisitorChange(record, eventType, { requestId });
+  await syncIntozi(record, eventType, { requestId });
 
   const populated = await Visitor.findById(record._id)
     .populate('issued_by updated_by', ACTOR_FIELDS)
@@ -991,6 +1020,7 @@ const deleteVisitor = async (id, scopeFilter = {}, { actor, requestId } = {}) =>
   // The tombstone. Same reasoning as a deleted registration: the row is gone,
   // so this event is the only thing that can tell Intozi to drop the plate.
   await emitVisitorChange(record, ACCESS_EVENT_TYPES.DELETED, { requestId });
+  await syncIntozi(record, ACCESS_EVENT_TYPES.DELETED, { requestId });
 
   return {
     id: String(record._id),

@@ -503,11 +503,12 @@ const authSchemas = ({ ROLE_VALUES, PERMISSIONS, LIST_MAX_LIMIT }) => ({
           },
           intozi_setup: {
             type: 'object',
-            description: 'The three values to hand the customer for their Intozi configuration.',
+            description:
+              'The values to hand the customer for their camera configuration. The registry is no ' +
+              'longer polled back — Prilinesha pushes it to Intozi’s watchlist as it changes.',
             properties: {
               group_id: { type: 'string', example: 'NETRU_PRO' },
               post_url: { type: 'string', example: '/api' },
-              feed_url: { type: 'string', example: '/api/feed' },
               authorization_header: { type: 'string', example: 'Bearer pk_NETRUPRO_9f2c…' },
             },
           },

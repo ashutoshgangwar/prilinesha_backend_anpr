@@ -2,16 +2,12 @@ const {
   VEHICLE_CLASSES,
   VEHICLE_COLORS,
   VEHICLE_TYPES,
-  FEED_DEFAULT_LIMIT,
-  FEED_MAX_LIMIT,
   REGISTRY_DEFAULT_LIMIT,
   REGISTRY_MAX_LIMIT,
   LIST_MAX_LIMIT,
   ROLE_VALUES,
   PERMISSIONS,
   RESIDENT_OCCUPANT_TYPES,
-  FEED_KEY_VOCABULARIES,
-  DEFAULT_FEED_KEY_VOCABULARY,
 } = require('../utils/constants');
 
 const { authPaths, projectPaths, userPaths, logPaths } = require('./swaggerAuthPaths');
@@ -71,8 +67,8 @@ const swaggerSpec = {
       '   a parking project, filled in from the project’s own type.',
       '6. Their gate desk issues visitor passes (`POST /api/visitors`) — one plate, one host, and',
       '   the window it is allowed in for, after which the plate reads as unregistered again.',
-      '7. Intozi posts events (`POST /api/anpr`) and polls the feed (`GET /api/anpr/feed`), which',
-      '   serves both lists as one.',
+      '7. Cameras post detections (`POST /api/anpr`); Prilinesha pushes the registry to Intozi’s',
+      '   Ikshana watchlist as it changes (see docs/INTOZI-INTEGRATION.md).',
     ].join('\n'),
   },
   servers: [{ url: '/', description: 'Current host' }],
@@ -92,7 +88,7 @@ const swaggerSpec = {
       name: 'Analytics',
       description: 'Registry totals and entry/exit counts over time — the dashboard tiles and charts',
     },
-    { name: 'ANPR', description: 'Event ingestion and the Intozi polling feed' },
+    { name: 'ANPR', description: 'Detection event ingestion (camera / Intozi → Prilinesha)' },
     { name: 'System', description: 'Health probes' },
   ],
   components: {
@@ -278,99 +274,6 @@ const swaggerSpec = {
               },
             },
           },
-          requestId: { type: 'string', format: 'uuid' },
-        },
-      },
-      VehicleFeedRecord: {
-        type: 'object',
-        description:
-          'One **change** on the Intozi feed — from a registration or a visitor pass, disclosed ' +
-          'identically. Only the fields below go out; the owner’s name and phone, a pass’s host ' +
-          'and purpose, the dates, and every internal id stay on the dashboard.\n\n' +
-          'Field names follow `?keys`: with `keys=intozi` the two aliased fields are named ' +
-          '`plate` and `vehicle_category` instead of `vehicle_number` and `vehicle_type`. ' +
-          '`group_id`, `device_names` and `event_type` are named the same in both vocabularies, ' +
-          'and the values never differ.',
-        properties: {
-          vehicle_number: {
-            type: 'string',
-            nullable: true,
-            description: 'Named `plate` when the request sent `keys=intozi`.',
-            example: 'UP32AB1234',
-          },
-          group_id: {
-            type: 'string',
-            nullable: true,
-            description:
-              'The project this vehicle is registered under. Per-row, because the legacy global ' +
-              'key reads across every project; with a per-project key it is the same on every row.',
-            example: 'ACME_MALL_PARKING',
-          },
-          vehicle_type: {
-            type: 'string',
-            enum: VEHICLE_TYPES,
-            description:
-              'The access state this change leaves the vehicle in. `unregistered` on every event ' +
-              'that takes access away — SUSPENDED, REVOKED, EXPIRED and DELETED — so a consumer ' +
-              'can act on this field alone without interpreting `event_type` at all.\n\n' +
-              '**Not a barrier decision on its own** — read it together with `device_names`.',
-            example: 'registered',
-          },
-          device_names: {
-            type: 'array',
-            items: { type: 'string' },
-            description:
-              'The gates this registration is good for, as configured on the project. A vehicle ' +
-              'that is `registered` but whose list does not name the gate it just arrived at must ' +
-              'be treated as unregistered there — that is the whole reason the list is on the ' +
-              'feed.\n\n' +
-              'The list is explicit: when an operator picks "all gates" on the dashboard it is ' +
-              'expanded to every active gate by name before it is stored, so this is the complete ' +
-              'set of gates the pass is good at — not a restriction read against a wildcard.\n\n' +
-              'Empty on a `DELETED` change, where the underlying record no longer exists.',
-            example: ['Netru Pro Entry', 'exit1'],
-          },
-          event_type: {
-            type: 'string',
-            enum: ['CREATED', 'UPDATED', 'REVOKED', 'SUSPENDED', 'EXPIRED', 'DELETED'],
-            description:
-              'What happened. `vehicle_type` says what the vehicle’s access *is*; this says why it ' +
-              'changed — and it is the only thing that can describe `DELETED`, where the record ' +
-              'itself is gone. See the endpoint description for the table of what to do with each.',
-            example: 'CREATED',
-          },
-        },
-      },
-      VehicleFeedResponse: {
-        type: 'object',
-        properties: {
-          success: { type: 'boolean', example: true },
-          message: { type: 'string', example: 'Vehicle feed fetched successfully.' },
-          count: { type: 'integer', example: 2 },
-          next_cursor: {
-            type: 'string',
-            nullable: true,
-            description:
-              'Send this back as `cursor` on the next poll to receive only newer changes. Store it ' +
-              '**only after** the page has been applied — it represents the last change you have ' +
-              'successfully processed. On an empty poll your own cursor is handed back.',
-            example: 'MjAyNS0xMi0yMlQxMjozMzowMS44NDRafDY3ODlhYjAxYzJkM2U0ZjU2Nzg5MDEyMw',
-          },
-          has_more: {
-            type: 'boolean',
-            description: 'true when more changes are already waiting — poll again immediately instead of sleeping.',
-            example: false,
-          },
-          resync_required: {
-            type: 'boolean',
-            description:
-              'Normally false. True when the cursor sent is older than the change log’s retention ' +
-              'window, so changes may have been pruned before this consumer read them and the page ' +
-              'could be hiding a revocation. Do not resume — rebuild the allow-list from a cold ' +
-              'start (no cursor).',
-            example: false,
-          },
-          data: { type: 'array', items: { $ref: '#/components/schemas/VehicleFeedRecord' } },
           requestId: { type: 'string', format: 'uuid' },
         },
       },
@@ -826,159 +729,15 @@ const swaggerSpec = {
         },
       },
     },
-    '/api/feed': {
-      get: {
-        tags: ['ANPR'],
-        summary: 'Access-list feed polled by the Intozi server',
-        description:
-          'Designed to be polled every 5-10 seconds. Returns **changes to vehicle access**, not ' +
-          'the vehicle list: Intozi keeps its own allow-list and applies each change to it.\n\n' +
-          'Both access lists feed it — the registered-vehicle registry and the visitor passes — ' +
-          'and a row does not say which it came from, because a barrier does not need to know. A ' +
-          'plate is either currently allowed at this gate or it is not.\n\n' +
-          '## The polling loop\n\n' +
-          '1. First ever call: no cursor. You receive the log from the beginning, which is how a ' +
-          'cold consumer builds its list.\n' +
-          '2. Apply the page to your allow-list.\n' +
-          '3. **Only then** store `next_cursor`, and send it as `cursor` on the next call.\n' +
-          '4. While `has_more` is true, poll again immediately rather than waiting for the ' +
-          'interval — you are behind, not idle.\n\n' +
-          'The cursor is the last change you have **successfully processed**. Re-sending the same ' +
-          'cursor always returns the same page, so a consumer that crashes or fails to apply a ' +
-          'page simply asks for it again. Never advance it before the page is applied.\n\n' +
-          'When nothing has changed you get `data: []`, `has_more: false`, and your own cursor ' +
-          'back — never the full vehicle list.\n\n' +
-          '## Applying a change\n\n' +
-          'Each row carries `event_type`, and `vehicle_type` telling you the state it leaves the ' +
-          'vehicle in. A consumer can act on either; `vehicle_type` alone is sufficient.\n\n' +
-          '| `event_type` | `vehicle_type` | What to do |\n' +
-          '| --- | --- | --- |\n' +
-          '| `CREATED` | registered | add the vehicle |\n' +
-          '| `UPDATED` | registered | add or replace it — also how a pre-booked visitor pass reports that its window has opened |\n' +
-          '| `UPDATED` | unregistered | it exists but is not valid yet; do not admit it |\n' +
-          '| `SUSPENDED` | unregistered | a registration was switched off — remove access |\n' +
-          '| `REVOKED` | unregistered | a visitor pass was withdrawn — remove access |\n' +
-          '| `EXPIRED` | unregistered | its `valid_till` passed — remove access |\n' +
-          '| `DELETED` | unregistered | the record is gone — remove it from your list |\n\n' +
-          'Events are delivered individually and in order, never collapsed. A vehicle that was ' +
-          'registered, then updated, then revoked produces three rows in that sequence, so ' +
-          'applying them in order always ends on the revocation.\n\n' +
-          '**Read the status and the gates together.** A grant can be limited to specific gates, ' +
-          'so `registered` means "this pass is current", not "open the barrier anywhere". At a ' +
-          'gate not in `device_names` the vehicle must be treated as unregistered. Prilinesha ' +
-          'applies that same rule when it stamps an incoming event. `device_names` is empty on ' +
-          '`DELETED`, where the record no longer exists to describe.\n\n' +
-          '## Expiry\n\n' +
-          'A pass closing at 18:00 generates an `EXPIRED` change shortly after 18:00, without ' +
-          'anyone touching the record. This matters more than it looks: the clock crossing ' +
-          '`valid_till` writes nothing to the underlying row, so a feed built on "what changed in ' +
-          'the vehicle collection" could never carry it, and the plate would stay in your ' +
-          'allow-list indefinitely. A background sweep publishes those transitions, normally ' +
-          'within a minute of them happening.\n\n' +
-          '## resync_required\n\n' +
-          'Normally `false`. It turns `true` when the cursor you sent is older than the change ' +
-          'log’s retention window, meaning changes may have been pruned before you read them and ' +
-          'the page you are being handed could have a gap where a revocation used to be. Do not ' +
-          'resume from that cursor: rebuild your allow-list from a cold start (no cursor).\n\n' +
-          '**Scope:** a per-project key returns that project’s registrations only, with no ' +
-          'parameter needed and none accepted that would widen it — naming a different `group_id` ' +
-          'is a 403, not a wider read. Only the legacy shared `API_KEY` sees every project.',
-        security: [{ ApiKeyAuth: [] }],
-        parameters: [
-          {
-            name: 'group_id',
-            in: 'query',
-            required: false,
-            schema: { type: 'string', example: 'ACME_MALL' },
-            description:
-              'Narrows within what the key already grants. Pointless for a per-project key, and ' +
-              'rejected with 403 if it names anything else.',
-          },
-          {
-            name: 'cursor',
-            in: 'query',
-            required: false,
-            schema: { type: 'string' },
-            description:
-              'The `next_cursor` from the previous response — the last change successfully ' +
-              'processed. Omit only on a cold start, which replays the log from the beginning.',
-          },
-          {
-            name: 'since',
-            in: 'query',
-            required: false,
-            schema: { type: 'string', format: 'date-time' },
-            description:
-              'Alternative cold start: return events received after this instant. Ignored when `cursor` is sent.',
-            example: '2025-12-22T12:33:01.744Z',
-          },
-          {
-            name: 'limit',
-            in: 'query',
-            required: false,
-            schema: {
-              type: 'integer',
-              minimum: 1,
-              maximum: FEED_MAX_LIMIT,
-              default: FEED_DEFAULT_LIMIT,
-            },
-            description: 'Page size.',
-          },
-          {
-            name: 'vehicle_type',
-            in: 'query',
-            required: false,
-            schema: { type: 'string', enum: VEHICLE_TYPES },
-            description:
-              'Restrict to changes that leave the vehicle in this state. Also accepted as ' +
-              '`vehicle_category`, so a client polling with `keys=intozi` can filter using the ' +
-              'name it reads back.\n\n' +
-              '⚠️ **Not for the polling loop.** Filtering a change feed to `registered` hides ' +
-              'every event that takes access away — revocations, suspensions, expiries and ' +
-              'deletions all carry `unregistered` — leaving a consumer that can add plates but ' +
-              'never remove them. Kept only for query compatibility and ad-hoc inspection.',
-          },
-          {
-            name: 'vehicle_category',
-            in: 'query',
-            required: false,
-            schema: { type: 'string', enum: VEHICLE_TYPES },
-            description: 'The same filter as `vehicle_type`, under the Intozi payload’s name for it.',
-          },
-          {
-            name: 'keys',
-            in: 'query',
-            required: false,
-            schema: { type: 'string', enum: FEED_KEY_VOCABULARIES, default: DEFAULT_FEED_KEY_VOCABULARY },
-            description:
-              'Which vocabulary to name the response fields in. Omitted or `canonical` returns ' +
-              '`vehicle_number` and `vehicle_type`, exactly as this feed always has. `intozi` ' +
-              'returns `plate` and `vehicle_category` instead, matching the key names the Intozi ' +
-              'payload uses on `POST /api`, so a client can speak one vocabulary in both ' +
-              'directions. Values are identical either way — only the key names change.',
-          },
-        ],
-        responses: {
-          200: {
-            description: 'Feed page (an empty `data` array simply means nothing new since the cursor)',
-            content: {
-              'application/json': { schema: { $ref: '#/components/schemas/VehicleFeedResponse' } },
-            },
-          },
-          400: { $ref: '#/components/responses/BadRequest' },
-          401: { $ref: '#/components/responses/Unauthorized' },
-          403: { $ref: '#/components/responses/Forbidden' },
-          429: { $ref: '#/components/responses/TooManyRequests' },
-          500: { $ref: '#/components/responses/ServerError' },
-        },
-      },
-    },
+    // `GET /api/feed` has been retired — the registry is pushed to Intozi's
+    // Ikshana watchlist as it changes (services/intoziService.js), not polled
+    // from here. See docs/INTOZI-INTEGRATION.md for the push integration.
     '/api/vehicles': {
       post: {
         tags: ['Vehicles'],
         summary: 'Register a vehicle in a project (or renew it)',
         description:
-          'Adds a vehicle to the registry that decides what `GET /api/anpr/feed` reports.\n\n' +
+          'Adds a vehicle to the registry, and pushes it to Intozi’s Ikshana watchlist.\n\n' +
           'A plate is unique **within a project**: submitting one already registered there updates ' +
           'the holder and extends `valid_till` (200, `created: false`) instead of failing — that is ' +
           'how an expired vehicle is renewed. A brand-new plate returns 201. The same plate ' +
@@ -1214,15 +973,17 @@ const swaggerSpec = {
           500: { $ref: '#/components/responses/ServerError' },
         },
       },
-      patch: {
+      put: {
         tags: ['Vehicles'],
-        summary: 'Edit a registration',
+        summary: 'Edit a registration (PATCH also accepted)',
         description:
-          'Only the fields sent change — omitting `device_names` leaves the gate list alone, while ' +
+          'Use `PUT` (or `PATCH`, a legacy alias — both hit the same handler). Only the fields sent ' +
+          'change — omitting `device_names` leaves the gate list alone, while ' +
           'sending an explicit `[]` widens a restricted registration back to every gate.\n\n' +
           '`group_id` and `vehicle_number` cannot be edited: together they are the row’s identity, ' +
           'and changing either is registering a different vehicle. A body that changes nothing is ' +
-          'a 400, so a mistyped field name cannot look like a successful edit.',
+          'a 400, so a mistyped field name cannot look like a successful edit.\n\n' +
+          'The change is pushed to Intozi’s watchlist immediately (see docs/INTOZI-INTEGRATION.md).',
         security: [{ BearerAuth: [] }],
         parameters: [vehicleIdParam],
         requestBody: {
@@ -1265,15 +1026,17 @@ const swaggerSpec = {
     },
 
     '/api/vehicles/{id}/status': {
-      patch: {
+      put: {
         tags: ['Vehicles'],
-        summary: 'Mark a vehicle registered or unregistered',
+        summary: 'Mark a vehicle registered or unregistered (PATCH also accepted)',
         description:
-          'The manual half of the status. `is_active: false` reports the plate as **unregistered** ' +
+          'Use `PUT` (or `PATCH`, a legacy alias). The manual half of the status. `is_active: false` ' +
+          'reports the plate as **unregistered** ' +
           'at every gate immediately, whatever `valid_till` says — for a resident who moved out, or ' +
-          'a pass suspended pending payment. `true` restores it.\n\n' +
-          'Stored on the record and live on Intozi’s next poll: the feed, the ingestion-time ' +
-          'decision and this table all derive status from the same two fields, so there is nothing ' +
+          'a pass suspended pending payment, and it is deleted from Intozi’s watchlist. `true` ' +
+          'restores it and re-adds it.\n\n' +
+          'Stored on the record: the ingestion-time ' +
+          'decision and this table derive status from the same two fields, so there is nothing ' +
           'to synchronise and nothing that can drift.\n\n' +
           'The other half is `valid_till`, and time owns that — expiry needs no cron job, and no ' +
           'stored `status` column exists that could disagree with either.',

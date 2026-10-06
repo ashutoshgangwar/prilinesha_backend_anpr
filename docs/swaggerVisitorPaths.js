@@ -362,9 +362,9 @@ const visitorPaths = {
       summary: 'Issue a visitor pass',
       description:
         'Grants one plate entry for a stated window, on a named resident’s or tenant’s behalf. ' +
-        'Inside that window `GET /api/feed` reports the plate as `registered`, exactly as it does ' +
-        'for a permanent registration; once the window closes, or the pass is revoked, the same ' +
-        'plate reads `unregistered` again — time enforces it, not a scheduled job.\n\n' +
+        'Inside that window the plate reads as `registered`, exactly as a permanent registration ' +
+        'does; once the window closes, or the pass is revoked, the same plate reads `unregistered` ' +
+        'again — time enforces it, not a scheduled job.\n\n' +
         '**Which word the host gets** is decided by the project: a `society` has residents, a ' +
         '`parking` project has tenants. Both have visitors, and nothing else here branches on the ' +
         'site type.\n\n' +

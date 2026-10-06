@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "Prilinesha ANPR API",
-    "description": "Run the requests **in order** — each one saves what the next needs.\n\n1-3  log in as the super admin, sign a customer up, inspect the session\n4-7  create the project (returns the Intozi API key once) and its gates\n8-10 grant the customer access to the project\nthen the vehicle registry, the camera ingest and the Intozi feed\nfinally the isolation checks, which must all fail with 401/403\n\nSet super_admin_email / super_admin_password first; everything else is captured automatically.",
+    "description": "Run the requests **in order** — each one saves what the next needs.\n\n1-3  log in as the super admin, sign a customer up, inspect the session\n4-7  create the project (returns the Intozi API key once) and its gates\n8-10 grant the customer access to the project\nthen the vehicle registry and the camera ingest (the registry is pushed to Intozi, not polled)\nfinally the isolation checks, which must all fail with 401/403\n\nSet super_admin_email / super_admin_password first; everything else is captured automatically.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -53,11 +53,6 @@
     {
       "key": "transaction_id",
       "value": "108",
-      "type": "string"
-    },
-    {
-      "key": "feed_cursor",
-      "value": "",
       "type": "string"
     }
   ],
@@ -1458,188 +1453,6 @@
       ]
     },
     {
-      "name": "ANPR - Intozi feed (200)",
-      "request": {
-        "method": "GET",
-        "header": [
-          {
-            "key": "Authorization",
-            "value": "Bearer {{project_key}}"
-          }
-        ],
-        "description": "Polling feed for the Intozi server. First call: no cursor (returns the newest page). Every later call sends back the stored feed_cursor, so only new events arrive.",
-        "url": {
-          "raw": "{{base_url}}/api/feed?cursor={{feed_cursor}}&limit=100",
-          "host": [
-            "{{base_url}}"
-          ],
-          "path": [
-            "api",
-            "feed"
-          ],
-          "query": [
-            {
-              "key": "cursor",
-              "value": "{{feed_cursor}}",
-              "description": "next_cursor from the previous response; leave empty on the first call"
-            },
-            {
-              "key": "limit",
-              "value": "100",
-              "description": "1-1000, default 100"
-            },
-            {
-              "key": "vehicle_type",
-              "value": "registered",
-              "description": "optional filter",
-              "disabled": true
-            },
-            {
-              "key": "since",
-              "value": "2025-12-22T12:33:01.744Z",
-              "description": "optional cold start instead of cursor",
-              "disabled": true
-            }
-          ]
-        }
-      },
-      "event": [
-        {
-          "listen": "test",
-          "script": {
-            "type": "text/javascript",
-            "exec": [
-              "pm.test('status is 200', () => pm.response.to.have.status(200));",
-              "const body = pm.response.json();",
-              "pm.test('feed envelope', () => {",
-              "  pm.expect(body.success).to.be.true;",
-              "  pm.expect(body.data).to.be.an('array');",
-              "});",
-              "pm.test('only vehicle_number and vehicle_type carry data', () => {",
-              "  body.data.forEach((record) => {",
-              "    ['owner_name', 'created_datetime', 'contact_no', 'email', 'driver_name', 'vehicle_model']",
-              "      .forEach((field) => pm.expect(record[field], field).to.be.null);",
-              "    pm.expect(record.vehicle_type).to.be.oneOf(['registered', 'unregistered']);",
-              "  });",
-              "});",
-              "// Persist the cursor so the next run only fetches new events.",
-              "if (body.next_cursor) pm.collectionVariables.set('feed_cursor', body.next_cursor);"
-            ]
-          }
-        }
-      ]
-    },
-    {
-      "name": "ANPR - Intozi feed, Intozi field names (200)",
-      "request": {
-        "method": "GET",
-        "header": [
-          {
-            "key": "Authorization",
-            "value": "Bearer {{project_key}}"
-          }
-        ],
-        "description": "The same feed named the way the POST payload is: plate and vehicle_category in place of vehicle_number and vehicle_type. group_id, device_names and event_type are unchanged, as is the envelope. Omit keys=intozi for the canonical names.",
-        "url": {
-          "raw": "{{base_url}}/api/feed?cursor={{feed_cursor}}&limit=100&keys=intozi",
-          "host": [
-            "{{base_url}}"
-          ],
-          "path": [
-            "api",
-            "feed"
-          ],
-          "query": [
-            {
-              "key": "cursor",
-              "value": "{{feed_cursor}}",
-              "description": "next_cursor from the previous response; leave empty on the first call"
-            },
-            {
-              "key": "limit",
-              "value": "100",
-              "description": "1-1000, default 100"
-            },
-            {
-              "key": "vehicle_type",
-              "value": "registered",
-              "description": "optional filter",
-              "disabled": true
-            },
-            {
-              "key": "since",
-              "value": "2025-12-22T12:33:01.744Z",
-              "description": "optional cold start instead of cursor",
-              "disabled": true
-            },
-            {
-              "key": "keys",
-              "value": "intozi"
-            }
-          ]
-        }
-      },
-      "event": [
-        {
-          "listen": "test",
-          "script": {
-            "type": "text/javascript",
-            "exec": [
-              "pm.test('status is 200', () => pm.response.to.have.status(200));",
-              "const rows = pm.response.json().data;",
-              "pm.test('rows are named the Intozi way', () => {",
-              "  rows.forEach((row) => {",
-              "    pm.expect(row).to.have.property('plate');",
-              "    pm.expect(row).to.have.property('vehicle_category');",
-              "    pm.expect(row).to.not.have.any.keys('vehicle_number', 'vehicle_type');",
-              "  });",
-              "});",
-              "pm.test('the envelope is unchanged', () => pm.expect(pm.response.json()).to.include.keys('count', 'next_cursor', 'has_more', 'resync_required'));"
-            ]
-          }
-        }
-      ]
-    },
-    {
-      "name": "ANPR - Intozi feed, bad cursor (400)",
-      "request": {
-        "method": "GET",
-        "header": [
-          {
-            "key": "Authorization",
-            "value": "Bearer {{project_key}}"
-          }
-        ],
-        "url": {
-          "raw": "{{base_url}}/api/feed?cursor=not-a-real-cursor",
-          "host": [
-            "{{base_url}}"
-          ],
-          "path": [
-            "api",
-            "feed"
-          ],
-          "query": [
-            {
-              "key": "cursor",
-              "value": "not-a-real-cursor"
-            }
-          ]
-        }
-      },
-      "event": [
-        {
-          "listen": "test",
-          "script": {
-            "type": "text/javascript",
-            "exec": [
-              "pm.test('status is 400', () => pm.response.to.have.status(400));"
-            ]
-          }
-        }
-      ]
-    },
-    {
       "name": "ANPR - invalid payload (400)",
       "request": {
         "method": "POST",
@@ -1874,39 +1687,6 @@
           "path": [
             "api",
             "vehicles"
-          ]
-        }
-      },
-      "event": [
-        {
-          "listen": "test",
-          "script": {
-            "type": "text/javascript",
-            "exec": [
-              "pm.test('401 Unauthorized', () => pm.response.to.have.status(401));"
-            ]
-          }
-        }
-      ]
-    },
-    {
-      "name": "Isolation - forged project key (401)",
-      "request": {
-        "method": "GET",
-        "header": [
-          {
-            "key": "Authorization",
-            "value": "Bearer pk_ACMEMALL_0000000000000000000000000000000000000000000000"
-          }
-        ],
-        "url": {
-          "raw": "{{base_url}}/api/feed",
-          "host": [
-            "{{base_url}}"
-          ],
-          "path": [
-            "api",
-            "feed"
           ]
         }
       },

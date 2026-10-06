@@ -4,6 +4,7 @@ const AppError = require('../utils/AppError');
 const logger = require('../utils/logger');
 const { resolveDeviceNames, resolveOccupantType, listScopedGates } = require('./projectService');
 const { recordChange } = require('./accessChangeService');
+const intoziService = require('./intoziService');
 const {
   VEHICLE_TYPES,
   REGISTRY_DEFAULT_LIMIT,
@@ -143,6 +144,17 @@ const toDashboardRecord = (record, now) => {
     registered_by: toActorSummary(record.registered_by),
     updated_by: toActorSummary(record.updated_by),
 
+    // Where this row stands on Intozi's watchlist, for a badge on the dashboard.
+    //   pending — not pushed yet (sync off, or awaiting the next attempt)
+    //   synced  — on Intozi's watchlist (anpr_wl_id is its id there)
+    //   failed  — the last push errored; it will be retried / reconciled
+    //   deleted — removed from the watchlist (expired, suspended or deleted)
+    intozi_sync: {
+      status: record.intozi?.sync_status ?? 'pending',
+      synced_at: record.intozi?.synced_at ?? null,
+      anpr_wl_id: record.intozi?.anpr_wl_id ?? null,
+    },
+
     created_at: record.createdAt,
     updated_at: record.updatedAt,
   };
@@ -173,6 +185,27 @@ const emitRegistrationChange = (record, eventType, { requestId } = {}) =>
       deviceNames: eventType === ACCESS_EVENT_TYPES.DELETED ? [] : record.device_names ?? [],
       source: ACCESS_CHANGE_SOURCES.REGISTRATION,
       sourceId: record._id,
+    },
+    { requestId }
+  );
+
+/**
+ * Pushes the registration's new state to Intozi's watchlist, right after the
+ * change has been committed and logged.
+ *
+ * The resulting access state decides the direction, with the same DELETED-is-
+ * always-unregistered rule the change log uses, so the two never disagree about
+ * what a row means. A no-op when Intozi sync is off, and never throws — a slow
+ * or down Intozi must not fail the dashboard action, it only leaves the row
+ * marked for reconcile (see services/intoziService.js).
+ */
+const syncIntozi = (record, eventType, { requestId } = {}) =>
+  intoziService.syncRegistration(
+    {
+      record,
+      eventType,
+      vehicleType:
+        eventType === ACCESS_EVENT_TYPES.DELETED ? 'unregistered' : statusOf(record, new Date()),
     },
     { requestId }
   );
@@ -284,11 +317,20 @@ const registerVehicle = async (payload, { actor, requestId } = {}) => {
     // CREATED the first time this plate is known to the project, UPDATED on a
     // renewal — Intozi applies both the same way (add or replace), but the
     // distinction is what lets an operator read the log.
-    await emitRegistrationChange(
-      record,
-      created ? ACCESS_EVENT_TYPES.CREATED : ACCESS_EVENT_TYPES.UPDATED,
-      { requestId }
-    );
+    const eventType = created ? ACCESS_EVENT_TYPES.CREATED : ACCESS_EVENT_TYPES.UPDATED;
+    await emitRegistrationChange(record, eventType, { requestId });
+    const syncResult = await syncIntozi(record, eventType, { requestId });
+
+    // Reflect the just-completed push on the record we return, so the dashboard
+    // shows "synced" / "pending" / "failed" in the very response to the add. The
+    // update/status paths re-read the row after the push, so they see it already.
+    if (syncResult?.sync_status) {
+      record.intozi = {
+        ...(record.intozi ?? {}),
+        sync_status: syncResult.sync_status,
+        ...(syncResult.anpr_wl_id !== undefined ? { anpr_wl_id: syncResult.anpr_wl_id } : {}),
+      };
+    }
 
     return { vehicle: toDashboardRecord(record, now), created };
   } catch (error) {
@@ -737,13 +779,12 @@ const updateVehicle = async (id, payload, scopeFilter = {}, { actor, requestId }
   // to treat it as "stop letting this vehicle in" rather than as an update it
   // can merge. The resulting vehicle_type says so too, but the event type is
   // what makes it unambiguous in the log.
-  await emitRegistrationChange(
-    record,
+  const eventType =
     changed.includes('is_active') && record.is_active === false
       ? ACCESS_EVENT_TYPES.SUSPENDED
-      : ACCESS_EVENT_TYPES.UPDATED,
-    { requestId }
-  );
+      : ACCESS_EVENT_TYPES.UPDATED;
+  await emitRegistrationChange(record, eventType, { requestId });
+  await syncIntozi(record, eventType, { requestId });
 
   const populated = await RegisteredVehicle.findById(record._id)
     .populate('registered_by updated_by', ACTOR_FIELDS)
@@ -790,11 +831,9 @@ const setVehicleStatus = async (id, isActive, scopeFilter = {}, { actor, request
 
   // Switching off is a suspension; switching back on is an update that restores
   // access, and carries the current gate list so Intozi can re-add it correctly.
-  await emitRegistrationChange(
-    record,
-    isActive ? ACCESS_EVENT_TYPES.UPDATED : ACCESS_EVENT_TYPES.SUSPENDED,
-    { requestId }
-  );
+  const eventType = isActive ? ACCESS_EVENT_TYPES.UPDATED : ACCESS_EVENT_TYPES.SUSPENDED;
+  await emitRegistrationChange(record, eventType, { requestId });
+  await syncIntozi(record, eventType, { requestId });
 
   const populated = await RegisteredVehicle.findById(record._id)
     .populate('registered_by updated_by', ACTOR_FIELDS)
@@ -838,6 +877,7 @@ const deleteVehicle = async (id, scopeFilter = {}, { actor, requestId } = {}) =>
   // its allow-list. Without this the vehicle would keep opening barriers on the
   // strength of a record that no longer exists.
   await emitRegistrationChange(record, ACCESS_EVENT_TYPES.DELETED, { requestId });
+  await syncIntozi(record, ACCESS_EVENT_TYPES.DELETED, { requestId });
 
   return {
     id: String(record._id),

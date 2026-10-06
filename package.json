@@ -11,6 +11,7 @@
     "dev": "nodemon server.js",
     "backfill:group-id": "node scripts/backfillGroupId.js",
     "seed:access-changes": "node scripts/seedAccessChanges.js",
+    "reset:intozi-sync": "node scripts/resetIntoziSync.js",
     "test": "node tests/accessFeed.test.js"
   },
   "keywords": [

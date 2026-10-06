@@ -3,6 +3,7 @@ const Visitor = require('../models/Visitor');
 const logger = require('../utils/logger');
 const config = require('../config/env');
 const { recordChanges, buildChange } = require('../services/accessChangeService');
+const intoziService = require('../services/intoziService');
 const {
   ACCESS_EVENT_TYPES,
   ACCESS_CHANGE_SOURCES,
@@ -71,6 +72,9 @@ let running = false;
  * @param {string} spec.source
  * @param {Function} spec.vehicleTypeOf Access state to publish for a claimed row.
  * @param {Date} spec.now
+ * @param {Function} [spec.onClaimed] Called with each just-claimed batch of rows
+ *                   after their marker is set — used to push the same transition
+ *                   onward to Intozi. Must not throw.
  * @returns {Promise<number>} How many changes were published.
  */
 const sweepTransition = async ({
@@ -81,13 +85,14 @@ const sweepTransition = async ({
   source,
   vehicleTypeOf,
   now,
+  onClaimed,
 }) => {
   let published = 0;
 
   for (let batch = 0; batch < EXPIRY_SWEEP_MAX_BATCHES; batch += 1) {
     const rows = await model
       .find(filter)
-      .select('_id group_id vehicle_number device_names valid_from valid_till is_active')
+      .select('_id group_id vehicle_number device_names valid_from valid_till is_active intozi')
       .limit(EXPIRY_SWEEP_BATCH_SIZE)
       .lean();
 
@@ -120,6 +125,11 @@ const sweepTransition = async ({
       { _id: { $in: rows.map((row) => row._id) }, [marker]: null },
       { $set: { [marker]: now } }
     );
+
+    // Carry the same transition onward to Intozi's watchlist (expiry = remove).
+    // Best-effort, like the change-log write above: a failure here leaves the
+    // row marked and logged for reconcile, never aborting the sweep.
+    if (onClaimed) await onClaimed(rows);
 
     // A short batch means the range is drained; no point asking again.
     if (rows.length < EXPIRY_SWEEP_BATCH_SIZE) break;
@@ -157,6 +167,9 @@ const runSweep = async ({ now = new Date() } = {}) => {
       source: ACCESS_CHANGE_SOURCES.REGISTRATION,
       vehicleTypeOf: () => 'unregistered',
       now,
+      // A lapsed registration must leave Intozi's allow-list too. One DELETE per
+      // claimed batch, never throwing — see intoziService.handleExpiredRegistrations.
+      onClaimed: (rows) => intoziService.handleExpiredRegistrations(rows),
     });
 
     // A visitor pass whose window has closed.
@@ -168,6 +181,8 @@ const runSweep = async ({ now = new Date() } = {}) => {
       source: ACCESS_CHANGE_SOURCES.VISITOR,
       vehicleTypeOf: () => 'unregistered',
       now,
+      // A closed pass must leave Intozi's watchlist too — one DELETE per batch.
+      onClaimed: (rows) => intoziService.handleExpiredRegistrations(rows, { model: Visitor }),
     });
 
     // A visitor pass whose window has just opened — the other side of the same
@@ -191,6 +206,8 @@ const runSweep = async ({ now = new Date() } = {}) => {
       source: ACCESS_CHANGE_SOURCES.VISITOR,
       vehicleTypeOf: () => 'registered',
       now,
+      // A pass whose window just opened must be added to Intozi's watchlist.
+      onClaimed: (rows) => intoziService.handleActivatedVisitors(rows),
     });
 
     const total =

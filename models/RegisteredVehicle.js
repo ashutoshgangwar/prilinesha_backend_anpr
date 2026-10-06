@@ -99,6 +99,36 @@ const registeredVehicleSchema = new mongoose.Schema(
     // Who last edited, deactivated or reactivated it. Distinct from
     // registered_by so "who added this?" survives somebody else's edit.
     updated_by: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+
+    // Mirror of this registration in Intozi's Ikshana watchlist, so we can
+    // update and delete the remote copy, not just create it (see
+    // services/intoziService.js). Populated on the first successful push and
+    // cleared when the vehicle is removed from the watchlist.
+    //
+    //   anpr_wl_id            — Intozi's record id, sent as `anpr_wl_id` on PUT
+    //                           and as a `data_id` on DELETE. Null until the
+    //                           first add succeeds.
+    //   device_field_data_id  — the `field_data_id` of the device_name custom
+    //   group_field_data_id     field and the group_id custom field, returned by
+    //                           the add and required to update them in place
+    //                           rather than creating duplicates.
+    //   sync_status           — where the remote copy stands: `pending` (never
+    //                           pushed), `synced`, `failed` (last push errored —
+    //                           a reconcile can retry), `deleted` (removed from
+    //                           the watchlist).
+    //   synced_at / last_error — observability for the last push.
+    intozi: {
+      anpr_wl_id: { type: Number, default: null },
+      device_field_data_id: { type: Number, default: null },
+      group_field_data_id: { type: Number, default: null },
+      sync_status: {
+        type: String,
+        enum: ['pending', 'synced', 'failed', 'deleted'],
+        default: 'pending',
+      },
+      synced_at: { type: Date, default: null },
+      last_error: { type: String, default: null },
+    },
   },
   {
     timestamps: true,
