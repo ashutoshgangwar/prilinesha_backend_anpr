@@ -177,6 +177,14 @@ const config = {
   INTOZI_FIELD_ID_DEVICE_NAME: asInt('INTOZI_FIELD_ID_DEVICE_NAME', 1, { min: 0 }),
   INTOZI_FIELD_ID_GROUP_ID: asInt('INTOZI_FIELD_ID_GROUP_ID', 2, { min: 0 }),
 
+  // Values to send to Intozi for person / contact / model. These default to
+  // placeholders but may be overridden per-deployment if different values are
+  // required. The user's request prefers a fixed (default) set rather than
+  // sending the real registrant details.
+  INTOZI_PERSON_NAME: optional('INTOZI_PERSON_NAME', 'Prilinesha'),
+  INTOZI_MOBILE_NUMBER: optional('INTOZI_MOBILE_NUMBER', '9999999999'),
+  INTOZI_MAKE_MODEL: optional('INTOZI_MAKE_MODEL', 'None'),
+
   UPLOAD_DIR: path.resolve(process.cwd(), optional('UPLOAD_DIR', './uploads')),
   UPLOAD_PUBLIC_PATH: optional('UPLOAD_PUBLIC_PATH', '/uploads'),
   SERVE_UPLOADS: optional('SERVE_UPLOADS', 'true') === 'true',

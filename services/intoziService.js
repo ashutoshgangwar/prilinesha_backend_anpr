@@ -194,6 +194,11 @@ const customFieldData = (record) => [
 const toAddPayload = (record, vehicleCategory = config.INTOZI_DEFAULT_VEHICLE_CATEGORY) => ({
   vehicle_number: record.vehicle_number,
   vehicle_category_name: vehicleCategory,
+  // Send fixed contact / model values rather than the real registrant data.
+  // These are configurable via env (`INTOZI_PERSON_NAME`, `INTOZI_MOBILE_NUMBER`, `INTOZI_MAKE_MODEL`).
+  person_name: config.INTOZI_PERSON_NAME,
+  mobile_number: config.INTOZI_MOBILE_NUMBER,
+  make_model: config.INTOZI_MAKE_MODEL,
   custom_field_data: customFieldData(record),
 });
 
@@ -221,6 +226,10 @@ const toUpdatePayload = (record, vehicleCategory = config.INTOZI_DEFAULT_VEHICLE
   return {
     anpr_wl_id: intozi.anpr_wl_id,
     vehicle_category_name: vehicleCategory,
+    // Keep the same fixed contact/model values on update as on add.
+    person_name: config.INTOZI_PERSON_NAME,
+    mobile_number: config.INTOZI_MOBILE_NUMBER,
+    make_model: config.INTOZI_MAKE_MODEL,
     image_updated: 0,
     custom_field_data: withDataIds,
   };
